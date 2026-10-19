@@ -1,5 +1,35 @@
 # Launchpad
 
+## Quick install
+
+Launchpad targets **OpenCode V2**. Add `opencode-launchpad` to the existing `plugins` array in
+`~/.config/opencode/cli.json` (or `$XDG_CONFIG_HOME/opencode/cli.json`):
+
+```json
+{
+  "plugins": ["opencode-launchpad"]
+}
+```
+
+Keep your other plugin entries and settings. OpenCode installs the package; restart the TUI to load
+Launchpad. Open **Launchpad: settings** in the command palette to hide, edit, or add buttons.
+
+## Screenshots
+
+### Cargo commands in the sidebar
+
+![Launchpad sidebar with Git controls and six Cargo command buttons](<images/Pasted image.png>)
+
+### Button visibility and custom buttons
+
+![Launchpad settings with visibility toggles, Edit, and New button controls](<images/Pasted image (2).png>)
+
+### Edit a runner
+
+![Button editor with name, executable, arguments, and working directory](<images/Pasted image (3).png>)
+
+## Overview
+
 OpenCode TUI plugin. The visible name of this plugin is **Launchpad**. It adds a grid of rectangular
 runner buttons to the session sidebar, always below every quota block, plus palette commands and a
 live log dialog. Buttons come from the project's package scripts and Cargo manifests, plus specialized Flutter, Next.js,
