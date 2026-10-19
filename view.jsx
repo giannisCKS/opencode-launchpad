@@ -114,7 +114,6 @@ export function Sidebar(props) {
                   label="Commit"
                   disabled={!board().canCommit}
                   onPress={() => runtime.openGit("commit")}
-                  centered={board().canCommit !== board().canPush}
                 />
               </Show>
               <Show when={board().canPush}>
@@ -123,7 +122,6 @@ export function Sidebar(props) {
                   label="Push"
                   disabled={!board().canPush}
                   onPress={() => runtime.openGit("push")}
-                  centered={board().canCommit !== board().canPush}
                 />
               </Show>
             </box>
@@ -146,7 +144,6 @@ export function Sidebar(props) {
                         const row = cell();
                         if (row) runtime.startAction(row.action.id);
                       }}
-                      centered={cells().length === 1}
                     />
                   )}
                 </Index>
@@ -167,7 +164,6 @@ export function Sidebar(props) {
                   label="Stop all"
                   disabled={!board().canStop}
                   onPress={() => runtime.stopAllRunners()}
-                  centered={board().showStop !== board().showLog}
                 />
               </Show>
               <Show when={board().showLog}>
@@ -176,7 +172,6 @@ export function Sidebar(props) {
                   label="Show logs"
                   disabled={!board().canLog}
                   onPress={() => runtime.showLog()}
-                  centered={board().showStop !== board().showLog}
                 />
               </Show>
             </box>
@@ -184,6 +179,33 @@ export function Sidebar(props) {
         </Show>
       </box>
     </Show>
+  );
+}
+
+// One label renderer for every sidebar cell, so a lone button, a paired button
+// and a control all read the same. The words of the label become separate text
+// nodes in one wrapping row, and the row centres each drawn line. A single
+// wrapping text node cannot do this: it draws every line from its own left edge,
+// and the core this view is rendered on has no text-align option. A flex row
+// that holds the whole label also fails, because a line that shrinks wraps the
+// label early. A word too long for its line still breaks inside its own node, so
+// nothing is drawn over a cell wall.
+function CellLabel(props) {
+  const words = createMemo(() =>
+    String(props.label ?? "")
+      .split(/\s+/)
+      .filter(Boolean),
+  );
+  return (
+    <box flexDirection="row" flexWrap="wrap" justifyContent="center" columnGap={1}>
+      <For each={words()}>
+        {(word) => (
+          <text fg={props.color} wrapMode="char" flexShrink={1} minWidth={0}>
+            {word}
+          </text>
+        )}
+      </For>
+    </box>
   );
 }
 
@@ -199,7 +221,6 @@ function RunnerButton(props) {
       minWidth={0}
       flexDirection="column"
       justifyContent="center"
-      alignItems={props.centered ? "center" : undefined}
       border
       borderStyle={visual().style}
       borderColor={visual().border}
@@ -209,16 +230,13 @@ function RunnerButton(props) {
       onMouseOut={props.onOut}
       onMouseUp={props.onPress}
     >
-      {/* The inset box keeps one column free on the right. Without it the label
-          wraps on the cell's unrounded flex width, so a label as long as the
-          interior draws its last glyph on the right wall. It also grows to the
-          cell height, which keeps a one line label on the first line when a
-          neighbour needs two. A button that has the row to itself centres its
-          label instead. */}
-      <box flexGrow={1} minWidth={0} paddingRight={1}>
-        <text fg={visual().text} wrapMode="word">
-          {row()?.action.label ?? ""}
-        </text>
+      {/* The inset box measures the label against the cell's inner width and
+          grows to the cell height, which keeps a one line label on the first
+          line when a neighbour needs two. It holds no column back on the right:
+          the centring row needs that column for the longest line a word can
+          take. */}
+      <box flexGrow={1} minWidth={0}>
+        <CellLabel color={visual().text} label={row()?.action.label ?? ""} />
       </box>
     </box>
   );
@@ -239,7 +257,6 @@ function UtilityButton(props) {
       minWidth={0}
       flexDirection="column"
       justifyContent="center"
-      alignItems={props.centered ? "center" : undefined}
       border
       borderStyle={visual().style}
       borderColor={visual().border}
@@ -252,13 +269,11 @@ function UtilityButton(props) {
         props.onPress();
       }}
     >
-      {/* Same inset box as a runner button, so the utility row lines up and a
-          long label cannot reach the right wall. A control that has the row to
-          itself centres its label instead. */}
-      <box flexGrow={1} minWidth={0} paddingRight={1}>
-        <text fg={visual().text} wrapMode="word">
-          {props.label}
-        </text>
+      {/* Same inset box as a runner button, so the utility row lines up and its
+          label is measured against the cell's inner width. The label centres
+          inside it, so a lone control and a paired control read the same. */}
+      <box flexGrow={1} minWidth={0}>
+        <CellLabel color={visual().text} label={props.label} />
       </box>
     </box>
   );
@@ -281,6 +296,42 @@ function Button(props) {
       onMouseOut={() => setHover(false)}
       onMouseUp={() => {
         if (props.disabled) return;
+        props.onPress();
+      }}
+    >
+      <text fg={visual().text} wrapMode="none">
+        {props.label}
+      </text>
+    </box>
+  );
+}
+
+// One glyph, one hit target: a ⊘ that adds an untracked file to .gitignore. It
+// is drawn for every file and is live only for an untracked, unblocked file
+// while the flow is idle. A dimmed control stays visible so the column reads as
+// one thing; its reason travels to the dialog hint on hover, because this host
+// draws no tooltip. The glyph is padded to two columns: a one column target is
+// too small to hit reliably.
+function IgnoreControl(props) {
+  const theme = props.theme;
+  const [hover, setHover] = createSignal(false);
+  const enabled = () => Boolean(props.enabled);
+  const visual = () => controlVisual(theme, { disabled: !enabled(), hovered: hover() });
+  const hint = () => (enabled() ? "Add to .gitignore" : props.reason);
+  return (
+    <box
+      flexShrink={0}
+      paddingLeft={1}
+      onMouseOver={() => {
+        setHover(true);
+        props.onHint?.(hint());
+      }}
+      onMouseOut={() => {
+        setHover(false);
+        props.onHint?.("");
+      }}
+      onMouseUp={() => {
+        if (!enabled()) return;
         props.onPress();
       }}
     >
@@ -414,6 +465,9 @@ export function GitDialog(props) {
   const { context, flow } = props;
   const theme = context.theme;
   const [version, setVersion] = createSignal(0);
+  // The ⊘ column has no tooltip in this host, so hovering a control writes its
+  // explanation here and the files step shows it under the list.
+  const [ignoreHint, setIgnoreHint] = createSignal("");
 
   onCleanup(flow.subscribe(() => setVersion((value) => value + 1)));
 
@@ -443,24 +497,47 @@ export function GitDialog(props) {
     return file.session ? "session change" : "unattributed";
   };
 
+  // A file can be ignored only when git itself reports it untracked, the service
+  // did not block it, and no step is running. Everything else draws the ⊘ dimmed
+  // with the reason a hover shows.
+  const ignorable = (file) => file.status === "untracked" && !file.blocked && !busy();
+  const ignoreReason = () =>
+    busy() ? "Wait for the current step to finish" : ".gitignore only applies to untracked files";
+
+  // The ⊘ ignore control and the selection target are siblings, never nested: one
+  // click target each, so a click on the symbol can never flip the selection and
+  // a click on the row can never ignore the file.
   const fileRow = (file) => {
     const selected = () => state()?.selection.includes(file.path) ?? false;
     const fg = () => (file.blocked ? token(theme, "textMuted") : token(theme, "textBase"));
     return (
-      <box
-        flexDirection="row"
-        gap={1}
-        onMouseUp={() => flow.toggle(file.path)}
-      >
-        <text fg={fg()} wrapMode="none">
-          {selected() ? "[x]" : "[ ]"}
-        </text>
-        <text fg={fg()} wrapMode="none" flexGrow={1}>
-          {file.path}
-        </text>
-        <text fg={token(theme, "textMuted")} wrapMode="none">
-          {marker(file)}
-        </text>
+      <box flexDirection="row" gap={1}>
+        <IgnoreControl
+          theme={theme}
+          label="⊘"
+          enabled={ignorable(file)}
+          reason={ignoreReason()}
+          onHint={(text) => setIgnoreHint(text ?? "")}
+          onPress={() => flow.ignoreFile?.(file.path)}
+        />
+        <box
+          flexDirection="row"
+          gap={1}
+          flexGrow={1}
+          flexBasis={0}
+          minWidth={0}
+          onMouseUp={() => flow.toggle(file.path)}
+        >
+          <text fg={fg()} wrapMode="none">
+            {selected() ? "[x]" : "[ ]"}
+          </text>
+          <text fg={fg()} wrapMode="none" flexGrow={1}>
+            {file.path}
+          </text>
+          <text fg={token(theme, "textMuted")} wrapMode="none">
+            {marker(file)}
+          </text>
+        </box>
       </box>
     );
   };
@@ -469,12 +546,15 @@ export function GitDialog(props) {
   // so it does not stick to the bottom like the live log does.
   const diffLines = () => String(state()?.preview?.diff ?? "").split("\n");
 
+  // The scrollbar draws over the last content column, so one column of padding
+  // keeps every wrapped diff byte clear of it.
   const diffBox = () => (
     <scrollbox
       scrollY
       flexGrow={1}
       minHeight={4}
       maxHeight={16}
+      paddingRight={1}
       ref={(node) => {
         try {
           node?.focus?.();
@@ -486,8 +566,8 @@ export function GitDialog(props) {
       <box flexDirection="column">
         <For each={diffLines()}>
           {(line) => (
-            <text fg={token(theme, "textMuted")} wrapMode="none">
-              {line.length > 200 ? `${line.slice(0, 200)}…` : line}
+            <text fg={token(theme, "textMuted")} wrapMode="char">
+              {line}
             </text>
           )}
         </For>
@@ -537,6 +617,11 @@ export function GitDialog(props) {
               </Show>
             </box>
           </scrollbox>
+          {/* The ⊘ column explained in one short line. Hovering a control
+              replaces it with that control's own explanation. */}
+          <text fg={token(theme, "textMuted")} wrapMode="word">
+            {ignoreHint() || "⊘ adds an untracked file to .gitignore. It only applies to untracked files."}
+          </text>
         </Show>
 
         <Show when={step("preview") || step("confirm")}>
@@ -553,8 +638,10 @@ export function GitDialog(props) {
 
         <Show when={step("egress")}>
           <text fg={token(theme, "textBase")} wrapMode="word">
-            Sending this diff to the GitHub Copilot CLI is the only thing that leaves
-            your machine in this flow. Approve it to get a draft message you can edit.
+            Sending this selected frozen diff to OpenCodex, your configured provider,
+            using gpt-6-luna, is the only thing that leaves your machine in this flow.
+            OpenCodex only drafts a message: no tools run and no session is created.
+            Approve it to get a message you can edit before the final commit.
           </text>
           <text fg={token(theme, "textMuted")} wrapMode="word">
             Files in the diff: {state().selection.join(", ")}
@@ -626,7 +713,7 @@ export function GitDialog(props) {
           <Show when={step("egress")}>
             <Button
               theme={theme}
-              label="Send diff to Copilot"
+              label="Send diff to OpenCodex"
               disabled={busy()}
               onPress={() => flow.approveEgress()}
             />

@@ -103,23 +103,36 @@ validate the captured directory before either flow proceeds.
 
 Both flows open a dialog and neither one touches the repository before you approve what it will do.
 
-**Commit** — the dialog lists the changed files and marks each one `session change` (it came from this
-session's diff: the live host snapshot first, then the SDK client) or `unattributed` (the diff could not
-be read, or did not answer with a known shape). Confirmed session changes start selected; unattributed
+**Commit** — the dialog lists the changed files and marks each one `session change` (confirmed by the
+current session or its descendants) or `unattributed` (no confirmed matching change). Descendants include
+native OpenCode subagents and OMO Slim subagents linked through the host's `parentID` relationship.
+Unrelated sessions in the same repository do not count. Attribution uses the native host client and
+bounded, paginated session history. It
+only includes descendants whose directory matches the captured session directory. Children in other
+or unverifiable directories are skipped with a warning rather than guessing how their paths map.
+Incomplete discovery or history reads show a warning; confirmed
+paths remain usable, while unknown files stay unchecked. Confirmed session changes start selected; unattributed
 files remain unchecked. Review and adjust the selection before continuing. A file the service refused
 to touch (a conflict, a submodule, an ambiguous rename, an
 unsafe path) is shown with its reason and cannot be picked. `Continue` freezes exactly the selected
 files into a private index and shows the full patch. If that patch cannot be shown in full, the review
 is dropped and nothing is committed. `Generate message` asks first: the next step states that the diff
-goes to the GitHub Copilot CLI, and that step is the only thing in the plugin that leaves your machine.
-Approve it and the returned draft opens in an editable message prompt; cancel or leave it empty and
-nothing is committed. Generated subjects use plain descriptions, without `feat:`, `fix:`, or other
+goes to the configured OpenCodex provider using `gpt-6-luna` with low reasoning. Generation uses
+OpenCode's native text API, without tools or a child session, and never falls back to another provider.
+Approve it and the returned draft opens in an editable message prompt. Clearing the field removes
+the draft and returns to the preview; cancelling an edit keeps the existing draft. Neither action
+commits anything. Generated subjects use plain descriptions, without `feat:`, `fix:`, or other
 Conventional Commit prefixes. The generation prompt forbids AI attribution. Manual edits are kept as
 written. `Commit` then commits those files from the frozen index, never skipping hooks,
 and reports the short hash. The message can be edited again before the final confirm. If the commit
 lands but a later step fails (a hook rewrote what was committed, the index moved, the reset failed),
 the dialog says so, shows the full commit hash, and stops: the commit is already in history, so it is
 never retried. Close the window and reconcile the leftover files by hand.
+
+In the file-selection screen, **⊘** adds an untracked file to the repository-root `.gitignore`.
+The rule targets that exact path, not a folder or file extension. Tracked and blocked entries cannot
+be ignored through this control: `.gitignore` does not stop tracking existing files. Ignoring a file
+does not stage or commit anything. The list refreshes while keeping your other selections.
 
 **Push** — the dialog resolves the exact destination from `@{push}` (never a guessed remote), and shows
 the branch, the remote URL, the upstream ref and the outgoing commits. `Confirm push` opens a second
@@ -391,18 +404,18 @@ script first, `flutter analyze` as the Flutter fallback, no defines file, no std
 neither exists. The runtime is covered behaviourally too: `stop all` counts only what it stopped and
 reports an in-flight stop as such, `Show logs` reopens the active project's output without spawning
 and explains an empty history, and a stop request for a vanished run is answered rather than ignored.
-The Git flows are covered end to end against the real service with a scripted `git` and `copilot`, so no
-repository, network call or Copilot run is involved: the click-time session and folder, the session
+The Git flows are covered against the service with scripted Git responses and a native text-generation
+double, without provider calls: the click-time session and folder, the session
 diff preselecting only confirmed safe session changes, a blocked file refusing selection, the exact patch and
-stat shown for review, the egress step being the only sender (from the review's temp folder, with
-`COPILOT_ALLOW_ALL` absent) and the API refusing to generate before that step, the editable message
+stat shown for review, generation sending only the frozen selected diff after sharing approval,
+the API refusing to generate before that step, the editable message
 prompt, the commit running the frozen selection
 without `--no-verify`, a truncated patch being dropped instead of committed blind, the push target
 resolved from `@{push}` and confirmed in a second step, one explicit remote and refspec with no force
 flag, the API refusing to push before that confirmation, and cancellation (button and escape) dropping
 the private index and the push token and writing nothing. The session diff is read from the live host
-snapshot when it exists and from the SDK client otherwise, and an unreadable diff leaves every file
-unattributed. Failure
+snapshot when it exists and from the native host client otherwise. Partial reads retain confirmed
+paths and warn; files without a confirmed match remain unattributed and unchecked. Failure
 paths are covered too: a repository that cannot be read, a push target that cannot be resolved, a
 commit that landed but failed its post-commit check (the full hash is reported, the flow becomes
 terminal, a second `Commit` press is a no-op, and closing still drops the review), and a
@@ -453,9 +466,11 @@ mouse handling on every terminal emulator. Those need a manual TUI check.
 - The stop grace period trades latency for cleanup: a child that ignores `SIGTERM` keeps its group
   alive until the five-second timer escalates to `SIGKILL`. During shutdown (`dispose`) that escalation
   is immediate, so the grace period is only skipped when the TUI is exiting.
-- The Git flows need the `git` binary on `PATH` and, for a generated message, the GitHub Copilot CLI.
-  A message is generated only after the egress step is approved; the diff is sent from the review's
-  temp folder, and the plugin never runs `git` or Copilot on its own before that step.
+- The Git flows need the `git` binary on `PATH`. Generated messages additionally need the native
+  OpenCode text-generation API and access to `opencodex/gpt-6-luna`; Copilot CLI is not required.
+  Generation sends only the frozen selected diff after sharing approval, with a 120-second deadline.
+  Subjects use plain English without Conventional Commit prefixes such as `feat:` or `fix:`.
+  Provider failures are reported without silently selecting a different provider or model.
 - `Push` pushes the branch's own `@{push}` destination with one refspec and no force flag. It does not
   offer a remote picker, and it never pushes tags.
 - Unless a stop is already in flight, a group is only signalled while its identity is provable: the

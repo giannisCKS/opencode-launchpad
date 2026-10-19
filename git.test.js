@@ -4,20 +4,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import {
+  LUNA_MODEL,
   MAX_MESSAGE_CHARS,
-  buildCopilotArgs,
+  buildGeneratePrompt,
   classifyStatus,
   createGitActions,
   defaultExec,
   isSafeRelPath,
+  gitignorePatternFor,
   parseStatusPorcelain,
   redact,
   sanitizeMessage,
+  writeAllSync,
 } from "./git.js";
 
 const BASE = process.env.PROJECT_RUNNERS_TEST_TMP || "/tmp/opencode";
@@ -86,7 +89,266 @@ function newActions(extra = {}) {
   return createGitActions({ tmpRoot: BASE, ...extra });
 }
 
-// ------------------------------------------------------------ pure functions
+// ------------------------------------------------------- add to .gitignore
+
+function isIgnored(dir, name) {
+  try {
+    // check-ignore rejects GIT_LITERAL_PATHSPECS, so it is run without the
+    // helper's environment; -- keeps a leading dash in a name from being read
+    // as an option.
+    execFileSync("git", ["check-ignore", "-q", "--", name], {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env, GIT_LITERAL_PATHSPECS: "0" },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test("gitignorePatternFor escapes every glob metacharacter and anchors to the root", () => {
+  assert.equal(gitignorePatternFor("a.txt"), "/a.txt");
+  assert.equal(gitignorePatternFor("dir/a.txt"), "/dir/a.txt");
+  assert.equal(gitignorePatternFor("star*.txt"), "/star\\*.txt");
+  assert.equal(gitignorePatternFor("q?.txt"), "/q\\?.txt");
+  assert.equal(gitignorePatternFor("[abc].txt"), "/\\[abc\\].txt");
+  assert.equal(gitignorePatternFor("back\\slash.txt"), "/back\\\\slash.txt");
+  assert.equal(gitignorePatternFor("sp ace.txt"), "/sp\\ ace.txt");
+  // A leading # or ! stays literal because the pattern starts with /.
+  assert.equal(gitignorePatternFor("#hash.txt"), "/#hash.txt");
+  assert.equal(gitignorePatternFor("!bang.txt"), "/!bang.txt");
+});
+
+test("addToGitignore ignores only the literal target and keeps the existing bytes", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  // Existing content without a trailing newline: the append must add exactly
+  // one separator and leave every earlier byte untouched.
+  repo.write(".gitignore", "already-here");
+  repo.write("star*.txt", "x\n");
+  repo.write("starX.txt", "x\n");
+  const before = readFileSync(repo.path(".gitignore"));
+
+  const actions = newActions();
+  const result = await actions.addToGitignore({ cwd: repo.dir, file: "star*.txt" });
+  assert.equal(result.ok, true, JSON.stringify(result.error));
+  assert.equal(result.file, "star*.txt");
+  assert.equal(result.root, repo.dir);
+
+  const after = readFileSync(repo.path(".gitignore"));
+  assert.equal(after.subarray(0, before.length).equals(before), true);
+  assert.equal(after.toString("utf8"), "already-here\n/star\\*.txt\n");
+  assert.equal(isIgnored(repo.dir, "star*.txt"), true);
+  // The glob did not widen: a different name is still not ignored.
+  assert.equal(isIgnored(repo.dir, "starX.txt"), false);
+  // Nothing was staged or committed; the .gitignore is a plain worktree change.
+  assert.equal(repo.git("status", "--porcelain"), "?? .gitignore\n?? starX.txt\n");
+  assert.equal(repo.git("log", "--format=%s").trim(), "init");
+  actions.dispose();
+});
+
+test("addToGitignore creates a missing .gitignore and preserves CRLF conventions", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("fresh.txt", "x\n");
+
+  const actions = newActions();
+  const created = await actions.addToGitignore({ cwd: repo.dir, file: "fresh.txt" });
+  assert.equal(created.ok, true, JSON.stringify(created.error));
+  assert.equal(readFileSync(repo.path(".gitignore"), "utf8"), "/fresh.txt\n");
+  // Creating the ignore file is a worktree change only: nothing staged.
+  assert.equal(repo.git("status", "--porcelain"), "?? .gitignore\n");
+
+  // A CRLF file keeps CRLF for the appended line.
+  repo.write("second.txt", "x\n");
+  repo.write(".gitignore", "old\r\n");
+  const appended = await actions.addToGitignore({ cwd: repo.dir, file: "second.txt" });
+  assert.equal(appended.ok, true, JSON.stringify(appended.error));
+  assert.equal(readFileSync(repo.path(".gitignore"), "utf8"), "old\r\n/second.txt\r\n");
+  actions.dispose();
+});
+
+test("addToGitignore refuses tracked, missing and non-file targets", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  mkdirSync(repo.path("dir"), { recursive: true });
+  writeFileSync(repo.path("dir/nested.txt"), "x\n");
+  const actions = newActions();
+
+  for (const [file, code] of [
+    ["a.txt", "not-untracked"],
+    ["dir", "not-untracked"],
+    ["missing.txt", "not-untracked"],
+    [".gitignore", "unsafe-path"],
+    ["../outside.txt", "unsafe-path"],
+    ["/etc/passwd", "unsafe-path"],
+    ["line\nbreak.txt", "unsafe-path"],
+    ["carriage\rreturn.txt", "unsafe-path"],
+    ["", "no-file"],
+  ]) {
+    const result = await actions.addToGitignore({ cwd: repo.dir, file });
+    assert.equal(result.ok, false, file);
+    assert.equal(result.error.code, code, file);
+  }
+  assert.equal(existsSync(repo.path(".gitignore")), false);
+  actions.dispose();
+});
+
+test("addToGitignore never sees a non-regular file: git does not list a FIFO", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  execFileSync("mkfifo", [repo.path("pipe")]);
+  const actions = newActions();
+  // git status omits FIFOs, so the target never becomes a candidate; the
+  // regular-file check in the service is a second line of defence.
+  const result = await actions.addToGitignore({ cwd: repo.dir, file: "pipe" });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "not-untracked");
+  assert.equal(existsSync(repo.path(".gitignore")), false);
+  actions.dispose();
+});
+
+test("addToGitignore appends LF after a CR-only .gitignore so the new rule is separate", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("cr.txt", "x\n");
+  // A legacy CR-only file has no LF at all: Git would read any appended text as
+  // part of the final pattern unless an LF is inserted first.
+  repo.write(".gitignore", "legacy\r");
+  const before = readFileSync(repo.path(".gitignore"));
+
+  const actions = newActions();
+  const result = await actions.addToGitignore({ cwd: repo.dir, file: "cr.txt" });
+  assert.equal(result.ok, true, JSON.stringify(result.error));
+
+  const after = readFileSync(repo.path(".gitignore"));
+  assert.equal(after.subarray(0, before.length).equals(before), true);
+  assert.equal(after.toString("utf8"), "legacy\r\n/cr.txt\n");
+  assert.equal(isIgnored(repo.dir, "cr.txt"), true);
+  actions.dispose();
+});
+
+test("addToGitignore refuses a .gitignore that is a directory", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("target.txt", "x\n");
+  mkdirSync(repo.path(".gitignore"));
+  const actions = newActions();
+  const result = await actions.addToGitignore({ cwd: repo.dir, file: "target.txt" });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "not-a-file");
+  actions.dispose();
+});
+
+test("addToGitignore refuses a symlink target and a symlinked .gitignore", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  symlinkSync("/etc/hostname", repo.path("outside-link"));
+  symlinkSync(repo.path("b.txt"), repo.path("inside-link"));
+  const actions = newActions();
+
+  const escaped = await actions.addToGitignore({ cwd: repo.dir, file: "outside-link" });
+  assert.equal(escaped.ok, false);
+  assert.equal(escaped.error.code, "symlink-escape");
+
+  const inside = await actions.addToGitignore({ cwd: repo.dir, file: "inside-link" });
+  assert.equal(inside.ok, false);
+  assert.equal(inside.error.code, "symlink");
+
+  // A .gitignore symlink must not be written through, even when it points
+  // inside the repo.
+  repo.write("target.txt", "x\n");
+  symlinkSync(repo.path("elsewhere"), repo.path(".gitignore"));
+  const linked = await actions.addToGitignore({ cwd: repo.dir, file: "target.txt" });
+  assert.equal(linked.ok, false);
+  assert.equal(linked.error.code, "symlink");
+  assert.equal(existsSync(repo.path("elsewhere")), false);
+  actions.dispose();
+});
+
+test("addToGitignore reports a write failure and leaves the file unchanged", async (t) => {
+  if (process.getuid?.() === 0) {
+    t.skip("root bypasses file permissions");
+    return;
+  }
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("target.txt", "x\n");
+  repo.write(".gitignore", "keep\n");
+  chmodSync(repo.path(".gitignore"), 0o444);
+  const actions = newActions();
+  try {
+    const result = await actions.addToGitignore({ cwd: repo.dir, file: "target.txt" });
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, "gitignore-unwritable");
+    assert.equal(readFileSync(repo.path(".gitignore"), "utf8"), "keep\n");
+    assert.equal(repo.git("status", "--porcelain"), "?? .gitignore\n?? target.txt\n");
+  } finally {
+    chmodSync(repo.path(".gitignore"), 0o644);
+    actions.dispose();
+  }
+});
+
+test("addToGitignore anchors a nested path to the repository root", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  mkdirSync(repo.path("sub"), { recursive: true });
+  writeFileSync(repo.path("sub/keep.log"), "x\n");
+  writeFileSync(repo.path("keep.log"), "x\n");
+
+  const actions = newActions();
+  const result = await actions.addToGitignore({ cwd: repo.dir, file: "sub/keep.log" });
+  assert.equal(result.ok, true, JSON.stringify(result.error));
+  assert.equal(readFileSync(repo.path(".gitignore"), "utf8"), "/sub/keep.log\n");
+  assert.equal(isIgnored(repo.dir, "sub/keep.log"), true);
+  // The same name at the root is not caught by the anchored pattern.
+  assert.equal(isIgnored(repo.dir, "keep.log"), false);
+  actions.dispose();
+});
+
+test("addToGitignore reports a create failure and leaves no .gitignore behind", async (t) => {
+  if (process.getuid?.() === 0) {
+    t.skip("root bypasses file permissions");
+    return;
+  }
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("target.txt", "x\n");
+  chmodSync(repo.dir, 0o555);
+  const actions = newActions();
+  try {
+    const result = await actions.addToGitignore({ cwd: repo.dir, file: "target.txt" });
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, "gitignore-unwritable");
+    assert.equal(existsSync(repo.path(".gitignore")), false);
+  } finally {
+    chmodSync(repo.dir, 0o755);
+    actions.dispose();
+  }
+});
+
+test("writeAllSync drains a short write instead of reporting a partial append", () => {
+  const dir = tempDir("git-test-write-");
+  const file = path.join(dir, "out.txt");
+  const fd = openSync(file, "w");
+  try {
+    // One byte per writeSync call: the helper must loop, not return early.
+    const total = writeAllSync(fd, "/very\\ long.txt\n", 1);
+    assert.equal(total, 16);
+  } finally {
+    closeSync(fd);
+  }
+  assert.equal(readFileSync(file, "utf8"), "/very\\ long.txt\n");
+
+  // A descriptor that accepts nothing must throw, not report success.
+  const readOnly = openSync(file, "r");
+  try {
+    assert.throws(() => writeAllSync(readOnly, "x"), /EBADF|EACCES|EIO/);
+  } finally {
+    closeSync(readOnly);
+  }
+});
 
 test("parseStatusPorcelain reads v2 -z records, keeping spaces and rename origins", () => {
   const stdout =
@@ -143,33 +405,26 @@ test("sanitizeMessage strips fences and bullets, and refuses empty output", () =
   assert.equal(sanitizeMessage("   \n  "), null);
   assert.equal(sanitizeMessage("\u001B[31mfeat: red\u001B[0m"), "feat: red");
   assert.equal(sanitizeMessage("x".repeat(MAX_MESSAGE_CHARS + 100)).length, MAX_MESSAGE_CHARS);
+  // A generated subject and body stay separated: the internal blank line is
+  // kept, only the outer whitespace is trimmed.
+  assert.equal(sanitizeMessage("  add the thing\n\nBody line one.\nBody line two.\n\n"), "add the thing\n\nBody line one.\nBody line two.");
+  // Repeated blanks collapse to one and a blank-only reply is still refused.
+  assert.equal(sanitizeMessage("subject\n\n\n\nbody"), "subject\n\nbody");
+  assert.equal(sanitizeMessage("\n\n\n"), null);
+  assert.equal(sanitizeMessage("\n  \n\t\n"), null);
 });
 
-test("buildCopilotArgs grants no tool access and takes the diff on stdin", () => {
-  const args = buildCopilotArgs({ prompt: "write a message" });
-  assert.equal(args[0], "--prompt");
-  assert.equal(args[1], "write a message");
-  assert.ok(args.includes("--no-ask-user"));
-  assert.ok(args.includes("--disable-builtin-mcps"));
-  assert.ok(args.includes("--no-auto-update"));
-  assert.ok(args.includes("--no-remote"));
-  // Denials are explicit and come before the empty allow-list.
-  for (const tool of ["shell", "write", "url"]) {
-    const index = args.indexOf(tool);
-    assert.ok(index > 0 && args[index - 1] === "--deny-tool", `deny ${tool}`);
-  }
-  assert.equal(args.at(-1), "--available-tools", "empty allow-list must be last");
-  // Hooks and instructions: no custom instructions, and --disallow-temp-dir is
-  // absent because the call runs from a neutral temp directory.
-  assert.ok(args.includes("--no-custom-instructions"));
-  assert.ok(!args.includes("--disallow-temp-dir"));
-  // The CLI's own help says non-interactive mode requires this; with an empty
-  // allow-list it grants nothing.
-  assert.ok(args.includes("--allow-all-tools"));
-  // No path widening, no blanket permissions, no tool grants, no session export.
-  for (const forbidden of ["--allow-tool", "--allow-all-paths", "--yolo", "--allow-all", "--share", "--share-gist", "--add-dir", "--allow-url"]) {
-    assert.ok(!args.includes(forbidden), `must not pass ${forbidden}`);
-  }
+test("buildGeneratePrompt quotes only the frozen diff and marks it untrusted", () => {
+  const prompt = buildGeneratePrompt({ diff: "diff --git a/a.txt b/a.txt\n+hello\n", files: ["a.txt"] });
+  // The diff is present and delimited, and the model is told not to obey it.
+  assert.match(prompt, /----- BEGIN DIFF -----/);
+  assert.match(prompt, /----- END DIFF -----/);
+  assert.match(prompt, /\+hello/);
+  assert.ok(prompt.indexOf("----- BEGIN DIFF -----") < prompt.indexOf("+hello"));
+  assert.ok(prompt.indexOf("+hello") < prompt.indexOf("----- END DIFF -----"));
+  assert.match(prompt, /untrusted/i);
+  // Plain English subject, never a Conventional Commit prefix.
+  assert.match(prompt, /Do not use Conventional Commit prefixes/);
 });
 
 // ------------------------------------------------------------- status/candidates
@@ -415,115 +670,289 @@ test("discard drops the review and leaves the repo untouched", async () => {
   actions.dispose();
 });
 
-// ------------------------------------------------------- copilot generation
+// --------------------------------------------------------- luna generation
+
+// Wait for a condition instead of guessing how long a flow needs.
+async function until(predicate, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("Timed out waiting for the generator to be called");
+}
+
+// A fake native generator that records every payload it is handed. It models the
+// confirmed host contract: `generate.text({ prompt, model }, { signal })`.
+function generator(handler) {
+  const calls = [];
+  const generateText = (payload, callOptions) => {
+    calls.push({ payload, signal: callOptions?.signal });
+    return handler(payload, callOptions);
+  };
+  generateText.calls = calls;
+  return generateText;
+}
 
 test("generation refuses to send anything without explicit egress approval", async () => {
   const repo = makeRepo();
   baseline(repo);
   repo.write("a.txt", "changed\n");
-  const calls = [];
-  const actions = newActions({
-    exec: async (call) => {
-      calls.push(call);
-      return defaultExec(call);
-    },
-  });
+  const generate = generator(() => ({ text: "change a" }));
+  const actions = newActions({ generateText: generate });
   const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+
+  // No approval: refused before any payload is built.
   const refused = await actions.generateMessage({ token: preview.token });
   assert.equal(refused.ok, false);
   assert.equal(refused.error.code, "egress-not-approved");
-  assert.equal(calls.some((call) => call.file === "copilot"), false);
+  assert.equal(generate.calls.length, 0);
   actions.dispose();
 });
 
-test("generation sends only the selected diff on stdin and returns a clean message", async () => {
+test("generation refuses a stale or unknown review before it sends anything", async () => {
   const repo = makeRepo();
   baseline(repo);
   repo.write("a.txt", "changed\n");
-  let copilotCall = null;
-  const actions = newActions({
-    exec: async (call) => {
-      if (call.file === "copilot") {
-        copilotCall = call;
-        return { ok: true, code: 0, spawnError: null, timedOut: false, stdout: "```\nfeat(core)!: change a\n```", stderr: "" };
-      }
-      return defaultExec(call);
-    },
-  });
+  const generate = generator(() => ({ text: "change a" }));
+  const actions = newActions({ generateText: generate });
+  const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+  actions.discard({ token: preview.token });
+
+  const stale = await actions.generateMessage({ token: preview.token, approveEgress: true });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.error.code, "unknown-preview");
+  assert.equal(generate.calls.length, 0, "a dropped review never reaches the model");
+  actions.dispose();
+});
+
+test("generation sends only the frozen diff to the exact Luna model and returns a clean message", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("a.txt", "changed\n");
+  // The repo carries an instruction file that must never travel to the model.
+  repo.write("AGENTS.md", "ALWAYS write a conventional commit\n");
+  const generate = generator(() => ({ text: "```\nfeat(core)!: change a\n```" }));
+  const actions = newActions({ generateText: generate });
   const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
   const generated = await actions.generateMessage({ token: preview.token, approveEgress: true });
   assert.equal(generated.ok, true, JSON.stringify(generated.error));
+  // The Conventional Commit prefix (scope and `!` included) is stripped.
   assert.equal(generated.message, "change a");
 
-  assert.ok(copilotCall);
-  assert.match(copilotCall.args.join(" "), /plain, descriptive commit message/);
-  assert.match(copilotCall.args.join(" "), /Do not use Conventional Commit prefixes/);
-  // The diff travels on stdin, never in argv.
-  assert.match(copilotCall.input, /\+changed/);
-  assert.ok(!copilotCall.args.join(" ").includes("+changed"));
-  assert.equal(copilotCall.args.at(-1), "--available-tools");
-  // Auth lives in the user's real COPILOT_HOME, so it is not overridden, and the
-  // call runs from the review's temp directory rather than the repo.
-  assert.equal(copilotCall.env.COPILOT_HOME, undefined);
-  assert.equal(copilotCall.env.COPILOT_ALLOW_ALL, undefined);
-  assert.notEqual(copilotCall.cwd, repo.dir);
-  assert.ok(copilotCall.cwd.startsWith(BASE), copilotCall.cwd);
+  assert.equal(generate.calls.length, 1, "the model is called once");
+  const [{ payload, signal }] = generate.calls;
+  assert.deepEqual(payload.model, { providerID: "opencodex", id: "gpt-6-luna", variant: "low" });
+  assert.equal(typeof signal.aborted, "boolean", "the call gets an AbortSignal");
+  // Only the frozen diff and the task instructions travel: the diff is present,
+  // and no repository instruction file is ever included.
+  assert.match(payload.prompt, /\+changed/);
+  assert.ok(payload.prompt.includes(preview.diff), "the exact reviewed patch is the payload");
+  assert.doesNotMatch(payload.prompt, /ALWAYS write a conventional commit/);
+  assert.doesNotMatch(payload.prompt, /AGENTS\.md/);
   actions.dispose();
 });
 
-test("generation can keep its session state out of the real home on request", async () => {
-  const repo = makeRepo();
-  baseline(repo);
-  repo.write("a.txt", "changed\n");
-  const home = tempDir("git-test-home-");
-  let copilotCall = null;
-  const actions = newActions({
-    copilotHome: home,
-    exec: async (call) => {
-      if (call.file === "copilot") {
-        copilotCall = call;
-        return { ok: true, code: 0, spawnError: null, timedOut: false, stdout: "fix: change a", stderr: "" };
-      }
-      return defaultExec(call);
-    },
-  });
-  const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
-  const generated = await actions.generateMessage({ token: preview.token, approveEgress: true });
-  assert.equal(generated.ok, true, JSON.stringify(generated.error));
-  assert.equal(generated.message, "change a");
-  assert.equal(copilotCall.env.COPILOT_HOME, home);
-  actions.dispose();
-});
-
-test("generation reports a malformed or failed Copilot reply instead of faking one", async () => {
+test("generation reports a malformed, empty or failed reply instead of faking one", async () => {
   const repo = makeRepo();
   baseline(repo);
   repo.write("a.txt", "changed\n");
 
-  const empty = newActions({
-    exec: async (call) =>
-      call.file === "copilot"
-        ? { ok: true, code: 0, spawnError: null, timedOut: false, stdout: "```\n```", stderr: "" }
-        : defaultExec(call),
-  });
+  const empty = newActions({ generateText: generator(() => ({ text: "```\n```" })) });
   const preview = await empty.preview({ cwd: repo.dir, files: ["a.txt"] });
   const blank = await empty.generateMessage({ token: preview.token, approveEgress: true });
   assert.equal(blank.ok, false);
   assert.equal(blank.error.code, "empty-message");
   empty.dispose();
 
-  const failed = newActions({
-    exec: async (call) =>
-      call.file === "copilot"
-        ? { ok: false, code: 1, spawnError: null, timedOut: false, stdout: "", stderr: "boom" }
-        : defaultExec(call),
+  const malformed = newActions({ generateText: generator(() => ({ text: "   \n  " })) });
+  const preview2 = await malformed.preview({ cwd: repo.dir, files: ["a.txt"] });
+  const broken = await malformed.generateMessage({ token: preview2.token, approveEgress: true });
+  assert.equal(broken.ok, false);
+  assert.equal(broken.error.code, "empty-message");
+  malformed.dispose();
+
+  const failing = newActions({
+    generateText: generator(() => {
+      throw new Error("provider exploded");
+    }),
   });
-  const preview2 = await failed.preview({ cwd: repo.dir, files: ["a.txt"] });
-  const broke = await failed.generateMessage({ token: preview2.token, approveEgress: true });
-  assert.equal(broke.ok, false);
-  assert.equal(broke.error.code, "copilot-failed");
-  assert.match(broke.error.message, /boom/);
-  failed.dispose();
+  const preview3 = await failing.preview({ cwd: repo.dir, files: ["a.txt"] });
+  const failed = await failing.generateMessage({ token: preview3.token, approveEgress: true });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.error.code, "generation-failed");
+  // The provider's own text can quote what it was sent, so it is replaced by a
+  // safe diagnostic instead of being surfaced.
+  assert.equal(failed.error.message, "Luna message generation failed");
+  assert.equal(JSON.stringify(failed).includes("provider exploded"), false, "no raw provider text");
+  failing.dispose();
+
+  // A host with no native text API reports a capability gap, not a model error.
+  const unavailable = newActions({
+    generateText: generator(() => {
+      const error = new Error("no client");
+      error.code = "generation-unavailable";
+      throw error;
+    }),
+  });
+  const preview4 = await unavailable.preview({ cwd: repo.dir, files: ["a.txt"] });
+  const gap = await unavailable.generateMessage({ token: preview4.token, approveEgress: true });
+  assert.equal(gap.ok, false);
+  assert.equal(gap.error.code, "generation-unavailable");
+  assert.equal(gap.error.message, "No commit message generator is connected");
+  unavailable.dispose();
+});
+
+test("a provider error that quotes the diff never carries it out of the service", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  // The changed line looks like a credential: if the provider echoes it, the
+  // error must not become a leak channel.
+  repo.write("a.txt", "SECRET=hunter2-not-a-real-token\n");
+  const generate = generator(() => {
+    // A provider that echoes the payload it rejected.
+    return Promise.reject(new Error("400 Bad Request: gh" + "p_" + "A".repeat(30)));
+  });
+  const actions = newActions({ generateText: generate });
+  const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+  const result = await actions.generateMessage({ token: preview.token, approveEgress: true });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "generation-failed");
+  assert.equal(result.error.message, "Luna message generation failed");
+  const surfaced = JSON.stringify(result);
+  assert.equal(surfaced.includes("hunter2-not-a-real-token"), false, "the diff is not echoed");
+  assert.equal(surfaced.includes("g" + "hp_"), false, "a token-shaped provider message is not echoed");
+  actions.dispose();
+});
+
+test("generation with no connected generator fails closed and never touches git", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("a.txt", "changed\n");
+  const actions = newActions();
+  const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+  const result = await actions.generateMessage({ token: preview.token, approveEgress: true });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "generation-unavailable");
+  assert.equal(actions.active(), null);
+  actions.dispose();
+});
+
+test("generation times out at the deadline and releases the busy lock", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("a.txt", "changed\n");
+  let capturedSignal = null;
+  const actions = newActions({
+    // Long enough that the recheck always finishes first, short enough to keep
+    // the test quick: the deadline must fire while the callback hangs.
+    generationTimeoutMs: 1500,
+    generateText: (payload, callOptions) => {
+      capturedSignal = callOptions.signal;
+      // Never settles: only the deadline can end this call.
+      return new Promise(() => {});
+    },
+  });
+  const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+  const result = await actions.generateMessage({ token: preview.token, approveEgress: true });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "message-timeout");
+  assert.equal(capturedSignal.aborted, true);
+  assert.equal(actions.active(), null, "the busy lock is released after a timeout");
+  actions.dispose();
+});
+
+test("dispose aborts an in-flight generation even if the callback ignores the signal", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("a.txt", "changed\n");
+  let callSignal = null;
+  const actions = newActions({
+    generationTimeoutMs: 5000,
+    generateText: (payload, callOptions) => {
+      callSignal = callOptions.signal;
+      return new Promise(() => {}); // ignores the signal entirely
+    },
+  });
+  const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+  const running = actions.generateMessage({ token: preview.token, approveEgress: true });
+  await until(() => callSignal !== null);
+  assert.ok(actions.active(), "a generation is active");
+  assert.equal(callSignal.aborted, false, "not aborted yet");
+
+  actions.dispose();
+  const settled = await running;
+  assert.equal(settled.ok, false);
+  assert.equal(settled.error.code, "message-cancelled");
+  assert.equal(callSignal.aborted, true, "dispose aborts the native request");
+  assert.equal(actions.active(), null, "the busy lock settles without the callback");
+});
+
+test("cancelGeneration aborts the request and releases the busy lock", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("a.txt", "changed\n");
+  let callSignal = null;
+  const actions = newActions({
+    generationTimeoutMs: 5000,
+    generateText: (payload, callOptions) => {
+      callSignal = callOptions.signal;
+      return new Promise(() => {});
+    },
+  });
+  const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+  const running = actions.generateMessage({ token: preview.token, approveEgress: true });
+  await until(() => callSignal !== null);
+  actions.cancelGeneration();
+  const settled = await running;
+  assert.equal(settled.error.code, "message-cancelled");
+  assert.equal(callSignal.aborted, true);
+  assert.equal(actions.active(), null);
+  actions.dispose();
+});
+
+test("cancelling or closing during the recheck never invokes the generator", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("a.txt", "changed\n");
+
+  for (const close of ["cancel", "dispose"]) {
+    const generate = generator(() => ({ text: "change a" }));
+    // Freeze the flow inside its recheck: the first git call after the review is
+    // approved blocks until the test says otherwise.
+    const realExec = defaultExec;
+    let releaseRecheck;
+    const recheckGate = new Promise((resolve) => {
+      releaseRecheck = resolve;
+    });
+    let armed = false;
+    let inRecheck = false;
+    const exec = async (request) => {
+      if (armed && !inRecheck) {
+        inRecheck = true;
+        await recheckGate;
+      }
+      return realExec(request);
+    };
+    const actions = newActions({ exec, generateText: generate });
+    const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+    armed = true;
+
+    const running = actions.generateMessage({ token: preview.token, approveEgress: true });
+    await until(() => inRecheck);
+    assert.equal(generate.calls.length, 0, "nothing was generated while the recheck ran");
+
+    if (close === "cancel") actions.cancelGeneration();
+    else actions.dispose();
+    releaseRecheck();
+
+    const settled = await running;
+    assert.equal(settled.ok, false, close);
+    assert.equal(settled.error.code, "message-cancelled", close);
+    assert.equal(generate.calls.length, 0, `${close}: the model was never called`);
+    assert.equal(actions.active(), null, `${close}: the busy lock is released`);
+    actions.dispose();
+  }
 });
 
 test("a selection past the diff bound is refused, never committed unseen", async () => {
@@ -550,12 +979,9 @@ test("a second flow is refused while one is active", async () => {
     release = resolve;
   });
   const actions = newActions({
-    exec: async (call) => {
-      if (call.file === "copilot") {
-        await gate;
-        return { ok: true, code: 0, spawnError: null, timedOut: false, stdout: "fix: x", stderr: "" };
-      }
-      return defaultExec(call);
+    generateText: async () => {
+      await gate;
+      return { text: "change a" };
     },
   });
   const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });

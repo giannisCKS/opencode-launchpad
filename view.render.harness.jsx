@@ -11,7 +11,7 @@
 // with bun from a directory that can resolve @opentui/solid. It prints one JSON
 // document after the marker line.
 import { testRender } from "@opentui/solid";
-import { SettingsDialog, Sidebar } from "./view.jsx";
+import { GitDialog, SettingsDialog, Sidebar } from "./view.jsx";
 
 const MARKER = "##SIDEBAR-RENDER##";
 
@@ -53,9 +53,50 @@ function createFakeRuntime(initial) {
   // The built-in controls are fixed: they are not part of the project's saved
   // order, so a move for one is refused and a runner is never swapped past them.
   const CONTROL_IDS = new Set(["commit", "push", "stop-all", "log"]);
+  // The commit flow behind GitDialog. It is not the runtime; GitDialog receives
+  // it as `flow`. Its calls land in the same log as the runtime's, so one
+  // scenario prints one call list.
+  const git = {
+    kind: initial.git?.kind ?? "commit",
+    step: initial.git?.step ?? "files",
+    busy: initial.git?.busy ?? null,
+    branch: initial.git?.branch ?? "main",
+    directory: initial.git?.directory ?? "/workspace/demo",
+    detached: initial.git?.detached ?? false,
+    notice: initial.git?.notice ?? null,
+    error: initial.git?.error ?? null,
+    preview: initial.git?.preview ?? null,
+    message: initial.git?.message ?? "",
+    push: initial.git?.push ?? null,
+    selection: [...(initial.git?.selection ?? [])],
+    files: (initial.git?.files ?? []).map((file) => ({ ...file })),
+  };
   return {
     state,
     calls,
+    gitFlow: {
+      subscribe: () => () => {},
+      state: () => ({
+        ...git,
+        files: git.files.map((file) => ({ ...file })),
+        selection: [...git.selection],
+      }),
+      toggle(path) {
+        calls.push(["toggle", path]);
+      },
+      ignoreFile(path) {
+        calls.push(["ignoreFile", path]);
+      },
+      cancel: () => calls.push(["cancel"]),
+      previewSelection: () => calls.push(["previewSelection"]),
+      back: () => calls.push(["back"]),
+      askEgress: () => calls.push(["askEgress"]),
+      approveEgress: () => calls.push(["approveEgress"]),
+      editMessage: () => calls.push(["editMessage"]),
+      confirm: () => calls.push(["confirm"]),
+      confirmPush: () => calls.push(["confirmPush"]),
+      pushNow: () => calls.push(["pushNow"]),
+    },
     notify() {
       for (const listener of [...listeners]) listener();
     },
@@ -278,9 +319,12 @@ function measure(nodes, path = "0") {
     const own = typeof child.plainText === "string" ? child.plainText : "";
     const below = measure(child, childPath);
     // A wrapped text node reports its text once per level, so repeats collapse:
-    // the bordered cell and the inset box around its label share one label.
-    const label = [...new Set([own, ...below.map((each) => each.label)])]
-      .filter(Boolean)
+    // the bordered cell and the inset box around its label share one label. A
+    // label drawn as one node per word reports every word as well, so a fragment
+    // that another node in the same subtree spells out in full is dropped.
+    const labels = [...new Set([own, ...below.map((each) => each.label)])].filter(Boolean);
+    const label = labels
+      .filter((each) => !labels.some((other) => other !== each && other.includes(each)))
       .join(" ")
       .replace(/\s+/g, " ")
       .trim();
@@ -1180,6 +1224,117 @@ scenario("settings-move-sidebar-order-70", {
     capture("before");
     await clickOn(setup, "[x] Live web", "↑");
     capture("after-move");
+  },
+});
+
+// The commit dialog with a fake flow, so a test can read exactly which calls a
+// click makes. The flow lives on the runtime so its calls share the runtime's
+// one log, which is what the harness prints.
+function gitScenario(name, options) {
+  scenario(name, {
+    width: options.width ?? 70,
+    height: options.height ?? 20,
+    runtime: createFakeRuntime({ board: boardOf(nextOnly), git: options.git }),
+    build(runtime) {
+      return (
+        <box flexDirection="column" width="100%" height="100%">
+          {GitDialog({
+            context: { theme, ui: { dialog: { clear: () => runtime.calls.push(["dialog.clear"]) } } },
+            flow: runtime.gitFlow,
+          })}
+        </box>
+      );
+    },
+    after: options.after,
+  });
+}
+
+// One untracked file the ⊘ can act on, one tracked file it cannot, and one the
+// service already refused. The selection is empty, so Continue stays off.
+const gitFileList = [
+  { path: "src/new-notes.md", status: "untracked", blocked: null, session: true, unattributed: false, index: " ", worktree: "?" },
+  { path: "src/app.js", status: "modified", blocked: null, session: true, unattributed: false, index: " ", worktree: "M" },
+  { path: "src/locked.bin", status: "conflicted", blocked: "conflicted", session: false, unattributed: true, index: "U", worktree: "U" },
+];
+
+gitScenario("git-files-70", { git: { files: gitFileList, selection: [] } });
+
+gitScenario("git-files-ignore-70", {
+  git: { files: gitFileList, selection: [] },
+  async after(setup, runtime, capture) {
+    await clickOn(setup, "src/new-notes.md", "⊘");
+    capture("after-ignore");
+  },
+});
+
+gitScenario("git-files-tracked-70", {
+  git: { files: gitFileList, selection: [] },
+  async after(setup, runtime, capture) {
+    await clickOn(setup, "src/app.js", "⊘");
+    capture("after-tracked");
+  },
+});
+
+gitScenario("git-files-blocked-70", {
+  git: { files: gitFileList, selection: [] },
+  async after(setup, runtime, capture) {
+    await clickOn(setup, "src/locked.bin", "⊘");
+    capture("after-blocked");
+  },
+});
+
+gitScenario("git-files-busy-70", {
+  git: { files: gitFileList, selection: ["src/app.js"], busy: "Committing" },
+  async after(setup, runtime, capture) {
+    await clickOn(setup, "src/new-notes.md", "⊘");
+    capture("after-busy");
+  },
+});
+
+// A long untracked path: the ⊘ stays left of the name and the status stays on
+// the right, so the row reads the same at any name length.
+gitScenario("git-files-longpath-70", {
+  git: {
+    files: [
+      { path: "src/features/checkout/components/payment-methods/very-long-file-name-for-testing.tsx", status: "untracked", blocked: null, session: true, unattributed: false },
+      { path: "src/app.js", status: "modified", blocked: null, session: true, unattributed: false },
+    ],
+    selection: [],
+  },
+});
+
+// A diff line past 200 columns must not be cut at display time: the egress step
+// shows the exact frozen diff, so the tail of the line has to be reachable. The
+// narrow viewport wraps the long line and the lines before it push the tail
+// below the fold, so only scrolling can reveal the marker.
+const LONG_LINE_TAIL = "END-OF-LONG-DIFF-LINE-9f3c";
+const longDiffLine = `+${"a".repeat(220)}${LONG_LINE_TAIL}`;
+gitScenario("git-egress-longline-36", {
+  width: 36,
+  height: 20,
+  git: {
+    step: "egress",
+    selection: ["src/app.js"],
+    preview: {
+      stat: "1 file changed",
+      diff: [
+        ...Array.from({ length: 24 }, (_, index) => ` context line ${index + 1}`),
+        longDiffLine,
+        "+short line after",
+      ].join("\n"),
+    },
+  },
+  async after(setup, runtime, capture) {
+    // The diff scrollbox is the only scrollable box on this screen. Scroll
+    // inside its bounds, not over the buttons below it.
+    const box = measure(setup.renderer.root).find((node) => node.ctor.includes("ScrollBox"));
+    if (!box) throw new Error("the egress screen has no diff scrollbox");
+    capture("before-scroll");
+    for (let index = 0; index < 80; index += 1) {
+      await setup.mockMouse.scroll(box.x + 2, box.y + 1, "down");
+    }
+    await setup.renderOnce();
+    capture("after-scroll");
   },
 });
 

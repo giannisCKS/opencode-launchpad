@@ -421,12 +421,33 @@ export function createRuntime({
     if (!serviceBuilt) {
       serviceBuilt = true;
       try {
-        serviceInstance = createGitActions(gitOptions ?? {});
+        // The message generator is the host's native text API, injected here so
+        // git.js stays host-independent. A caller can override it (tests inject
+        // a fake); otherwise the adapter below reads the live client lazily.
+        const generateText = gitOptions?.generateText ?? nativeGenerateText;
+        serviceInstance = createGitActions({ ...gitOptions, generateText });
       } catch {
         serviceFailed = true;
       }
     }
     return serviceFailed ? null : serviceInstance;
+  }
+
+  // The native adapter: `client.generate.text({ prompt, model }, { signal })`.
+  // The installed host exposes it on the session client (`dist/promise/client.d.ts`),
+  // not on any SDK import, so it is read lazily and called with the client as
+  // `this`. No tool or session route is touched: the payload is the prompt alone.
+  function nativeGenerateText(payload, callOptions) {
+    const generate = context?.client?.generate;
+    const text = generate?.text;
+    if (typeof text !== "function") {
+      // A structured code, not the wording, tells git.js this is a missing host
+      // capability rather than a provider failure.
+      const error = new Error("the session client cannot generate text");
+      error.code = "generation-unavailable";
+      throw error;
+    }
+    return text.call(generate, payload, callOptions);
   }
 
   // The Git controls are disabled while no service exists, and they say why
@@ -505,6 +526,13 @@ export function createRuntime({
     const current = flow;
     flow = null;
     flowGeneration += 1;
+    // A generation in flight belongs to this flow: abort it so the request stops
+    // and the service's busy lock is released, even if the callback is slow.
+    try {
+      current?.actions?.cancelGeneration?.();
+    } catch {
+      // best effort: nothing was generating
+    }
     for (const token of [current?.token, current?.pushToken]) {
       if (!token) continue;
       try {
@@ -529,8 +557,8 @@ export function createRuntime({
   // starts checked, and anything the source cannot confirm is shown as
   // unattributed and left unchecked.
   //
-  // The installed TUI host is `@opencode/client` 2.0.32 `OpenCodeClient`
-  // (verified against the published package:
+  // The installed TUI host is `@opencode/client` `OpenCodeClient` (verified
+  // against the published package:
   // `dist/promise/client.d.ts` and `dist/promise/generated/types.d.ts`), not
   // `@opencode-ai/sdk`. Its actual contract:
   //   - `client.message.list({ sessionID, limit?, order?, cursor?, type? })`
@@ -541,6 +569,9 @@ export function createRuntime({
   //     to diff" and `to` defaults to "the turn of `from` alone". The no-argument
   //     call therefore answers only the newest user turn, which loses earlier
   //     edits - the screenshot's "everything unattributed" bug.
+  //   - `client.session.list({ parentID, directory, limit?, cursor? })` resolves
+  //     `{ data: SessionInfo[], cursor: { previous?, next? } }`. A child record
+  //     carries `parentID`; there is no separate `session.children` route.
   //
   // Attribution therefore walks the user turns oldest-first with the opaque
   // `cursor.next` (docs: `order` applies to the first page and "do not combine
@@ -552,16 +583,41 @@ export function createRuntime({
   // an error, or a truncated walk keeps the confirmed subset and adds a truthful
   // warning. Nothing is ever inferred from the git working tree.
   //
+  // Child sessions (native subagents and OMO slim, which both set the native
+  // `parentID`) are enumerated breadth-first from the root with the same
+  // `session.list` route. The query deliberately carries no folder filter: a
+  // folder filter would hide the children that live in another folder, and
+  // naming them wrong would attribute a same-named file from the wrong folder.
+  // Each listed record's own folder (`directory`, else `location.directory`) is
+  // resolved and compared with the captured folder instead; a child in another
+  // folder, or one whose folder cannot be verified, is skipped and disclosed.
+  // Only records whose `parentID` is the exact node being expanded are
+  // followed, ids are deduplicated, and pages, nodes, and depth are bounded. A
+  // list failure keeps the confirmed tree and warns; it never erases the root's
+  // attribution.
+  //
   // A legacy synchronous `state.session.diff(sessionID)` snapshot still wins
-  // when it reports files; an empty snapshot is not evidence and does not hide
-  // the live client.
+  // for the root when it reports files; an empty snapshot is not evidence and
+  // does not hide the live client. Children have no legacy snapshot.
   const MESSAGE_PAGE_LIMIT = 100;
   const MESSAGE_PAGE_CAP = 20;
   const TURN_DIFF_CAP = 50;
+  const SESSION_PAGE_LIMIT = 20;
+  const SESSION_PAGE_CAP = 3;
+  const SESSION_NODE_CAP = 100;
+  const SESSION_DEPTH_CAP = 4;
   const UNRESOLVED_WARNING =
     "Some session changes could not be read, so unattributed files must be selected by hand.";
   const INCOMPLETE_WARNING =
     "The session history is longer than one read, so older session changes may still be unattributed.";
+  const DESCENDANT_WARNING =
+    "Child session changes could not be read, so some files may still be unattributed.";
+  const DESCENDANT_SKIPPED_WARNING =
+    "Child sessions in other or unverified folders were skipped, so their changes may still be unattributed.";
+  const CHILD_UNSUPPORTED_WARNING =
+    "Child sessions cannot be listed on this host, so files changed in them may still be unattributed.";
+  const DESCENDANT_LIMIT_WARNING =
+    "The child session tree is larger than one read, so some child changes may still be unattributed.";
 
   function diffEntries(result) {
     return Array.isArray(result) ? result : null;
@@ -657,18 +713,141 @@ export function createRuntime({
     }
   }
 
-  async function sessionChangedFiles(sessionID) {
-    if (typeof sessionID !== "string" || !sessionID) return { files: [], warning: "" };
+  // The folder a listed session claims: `directory` first, else
+  // `location.directory`. Anything else (missing, empty, non-string) is
+  // unverifiable and yields null. A claim is resolved to an absolute path so it
+  // can be compared with the captured folder exactly; a relative claim resolves
+  // against the process folder, so it only counts when it lands on the captured
+  // folder, never by assuming a repo root or worktree.
+  function recordDirectory(record) {
+    const raw =
+      typeof record?.directory === "string" && record.directory
+        ? record.directory
+        : typeof record?.location?.directory === "string" && record.location.directory
+          ? record.location.directory
+          : null;
+    return raw === null ? null : path.resolve(raw);
+  }
 
-    try {
-      const snapshot = context.state?.session?.diff?.(sessionID);
-      if (Array.isArray(snapshot) && snapshot.length > 0) {
-        const files = new Set();
-        addEntryPaths(files, snapshot);
-        return { files: [...files], warning: "" };
+  // Read one page list of a session's direct children. The response is
+  // untrusted: only a record whose `parentID` is exactly the requested id is a
+  // child of it, ids must be non-empty strings, and duplicates are dropped. A
+  // `directory` filter is never sent - the listing would hide children from
+  // other folders - so every record's own folder is verified against the
+  // captured folder instead; a child in another or unverifiable folder is
+  // skipped, never attributed by name. A cursor that does not advance (no new
+  // child) ends the walk instead of looping.
+  async function listSessionChildren(session, parentID, directory, options = {}) {
+    const limit = options.limit ?? SESSION_PAGE_LIMIT;
+    const maxPages = options.maxPages ?? SESSION_PAGE_CAP;
+    const captured = typeof directory === "string" && directory ? path.resolve(directory) : null;
+    const records = [];
+    const seen = new Set();
+    let failed = false;
+    let truncated = false;
+    let skipped = false;
+    let cursor;
+    for (let page = 0; page < maxPages; page += 1) {
+      let result;
+      try {
+        result = await session.list({
+          parentID,
+          limit,
+          ...(cursor ? { cursor } : {}),
+        });
+      } catch {
+        // A rejected request is a failure, not evidence of a larger tree.
+        return { records, failed: true, truncated, skipped };
       }
-    } catch {
-      // fall through to the client sources
+      if (!Array.isArray(result?.data)) return { records, failed: true, truncated, skipped };
+      let considered = 0;
+      for (const record of result.data) {
+        if (record?.parentID !== parentID) continue;
+        const id = record?.id;
+        if (typeof id !== "string" || !id || seen.has(id)) continue;
+        seen.add(id);
+        considered += 1;
+        const folder = recordDirectory(record);
+        if (captured === null || folder === null || folder !== captured) {
+          // The session exists, but its folder is not the captured one or cannot
+          // be verified: its files are not this folder's changes.
+          skipped = true;
+          continue;
+        }
+        records.push(id);
+      }
+      const next = result?.cursor?.next;
+      if (typeof next !== "string" || !next) return { records, failed, truncated, skipped };
+      if (considered === 0) return { records, failed, truncated: true, skipped };
+      cursor = next;
+      if (page === maxPages - 1) return { records, failed, truncated: true, skipped };
+    }
+    return { records, failed, truncated: true, skipped };
+  }
+
+  // Breadth-first enumeration of the native `parentID` tree. The root is never
+  // re-added, each id is visited once (a cycle cannot loop), and every bound is
+  // reported rather than silently dropping work. Depth is probed: a node at the
+  // depth cap is not expanded, but a one-record probe detects deeper children so
+  // the bound is only reported when it actually hides something.
+  async function readDescendantSessions(session, rootID, directory) {
+    if (typeof session?.list !== "function") {
+      return { ids: [], failed: false, unsupported: true, truncated: false, skipped: false };
+    }
+    const ids = [];
+    const seen = new Set([rootID]);
+    const queue = [{ id: rootID, depth: 0 }];
+    let failed = false;
+    let truncated = false;
+    let skipped = false;
+    while (queue.length > 0) {
+      const node = queue.shift();
+      if (node.depth >= SESSION_DEPTH_CAP) {
+        const probe = await listSessionChildren(session, node.id, directory, {
+          limit: 1,
+          maxPages: 1,
+        });
+        if (probe.failed) failed = true;
+        if (probe.records.length > 0 || probe.truncated) truncated = true;
+        if (probe.skipped) skipped = true;
+        continue;
+      }
+      const page = await listSessionChildren(session, node.id, directory);
+      if (page.failed) failed = true;
+      if (page.truncated) truncated = true;
+      if (page.skipped) skipped = true;
+      for (const id of page.records) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        if (ids.length >= SESSION_NODE_CAP) {
+          truncated = true;
+          break;
+        }
+        ids.push(id);
+        queue.push({ id, depth: node.depth + 1 });
+      }
+      if (ids.length >= SESSION_NODE_CAP) {
+        if (queue.length > 0) truncated = true;
+        break;
+      }
+    }
+    return { ids, failed, unsupported: false, truncated, skipped };
+  }
+
+  // One session's confirmed files. The legacy snapshot only exists for the root;
+  // children are always read through the live client.
+  async function readSessionChanges(sessionID, { legacySnapshot = false } = {}) {
+    if (legacySnapshot) {
+      try {
+        const snapshot = context.state?.session?.diff?.(sessionID);
+        if (Array.isArray(snapshot) && snapshot.length > 0) {
+          const files = new Set();
+          addEntryPaths(files, snapshot);
+          return { files: [...files], warning: "" };
+        }
+      } catch {
+        // fall through to the client sources
+      }
     }
 
     const files = new Set();
@@ -700,6 +879,35 @@ export function createRuntime({
     }
 
     return { files: [...files], warning: UNRESOLVED_WARNING };
+  }
+
+  // Root plus its confirmed descendants: each session contributes only its own
+  // user-turn diffs. The captured folder is the validation key, not a list
+  // filter: a child is expanded only when its own folder resolves to it, so a
+  // same-named file from another folder can never be attributed. A child that
+  // cannot be read keeps the root and the siblings it already confirmed, and the
+  // partial result is stated.
+  async function sessionChangedFiles(sessionID, directory) {
+    if (typeof sessionID !== "string" || !sessionID) return { files: [], warning: "" };
+
+    const root = await readSessionChanges(sessionID, { legacySnapshot: true });
+    const files = new Set(root.files);
+    const warnings = root.warning ? [root.warning] : [];
+    const descendants = await readDescendantSessions(context.client?.session, sessionID, directory);
+    if (descendants.unsupported) {
+      warnings.push(CHILD_UNSUPPORTED_WARNING);
+    } else {
+      for (const id of descendants.ids) {
+        const child = await readSessionChanges(id);
+        for (const file of child.files) files.add(file);
+        if (child.warning) warnings.push(child.warning);
+      }
+      if (descendants.failed) warnings.push(DESCENDANT_WARNING);
+      if (descendants.skipped) warnings.push(DESCENDANT_SKIPPED_WARNING);
+      if (descendants.truncated) warnings.push(DESCENDANT_LIMIT_WARNING);
+    }
+
+    return { files: [...files], warning: [...new Set(warnings)].join(" ") };
   }
 
   function beginFlow(kind, { actions, sessionID, directory }) {
@@ -736,7 +944,12 @@ export function createRuntime({
     else void loadSelection();
   }
 
-  async function loadSelection() {
+  // Rebuild the file list from the captured folder and session. `preserve` is
+  // set only by the ignore refresh: it keeps the user's own choices instead of
+  // rebuilding the default selection, and keeps the attribution notice when the
+  // new read has no warning of its own. A plain reload passes nothing and gets
+  // the fresh default, so an action's own refresh never widens a commit.
+  async function loadSelection({ preserve = null } = {}) {
     const current = flow;
     if (!current) return null;
     current.step = "loading";
@@ -744,7 +957,7 @@ export function createRuntime({
     current.error = null;
     current.notice = "";
     flowChanged();
-    const attribution = await sessionChangedFiles(current.sessionID);
+    const attribution = await sessionChangedFiles(current.sessionID, current.directory);
     const result = await current.actions.status({ cwd: current.directory, sessionFiles: attribution.files });
     if (flow !== current) return null;
     if (!result?.ok) {
@@ -761,10 +974,19 @@ export function createRuntime({
     // The attribution read is advisory: a partial read still shows its confirmed
     // paths. Say so instead of letting the user assume everything was seen.
     if (attribution.warning) current.notice = attribution.warning;
-    // Only confirmed session changes start checked; unsafe files never do.
-    current.selection = new Set(
-      current.files.filter((file) => file.session === true && !file.blocked).map((file) => file.path),
-    );
+    else if (preserve?.notice) current.notice = preserve.notice;
+    if (preserve) {
+      // Keep the user's choices, dropping paths that are gone or no longer
+      // selectable. Nothing is added back, so an ignored path and the new
+      // .gitignore entry are never checked on the user's behalf.
+      const eligible = new Set(result.files.filter((file) => !file.blocked).map((file) => file.path));
+      current.selection = new Set([...preserve.selection].filter((path) => eligible.has(path)));
+    } else {
+      // Only confirmed session changes start checked; unsafe files never do.
+      current.selection = new Set(
+        current.files.filter((file) => file.session === true && !file.blocked).map((file) => file.path),
+      );
+    }
     current.step = "files";
     flowChanged();
     return result;
@@ -864,6 +1086,65 @@ export function createRuntime({
     return true;
   }
 
+  // Ignore is a row action, not a commit step: it writes the captured folder's
+  // root .gitignore through the service and stages and commits nothing. Only an
+  // untracked, unflagged file can be ignored; a blocked or tracked file is shown
+  // and refused. The captured directory and session are the ones the flow opened
+  // with, so switching tabs cannot retarget the write at another project.
+  async function ignoreFile(filePath) {
+    const current = flow;
+    if (!current || current.step !== "files" || current.busy) return null;
+    const file = current.files.find((entry) => entry.path === filePath);
+    if (!file || file.blocked || file.status !== "untracked") return null;
+    if (typeof current.actions?.addToGitignore !== "function") {
+      const reason = "the git service is missing the ignore step";
+      current.error = { code: "ignore-unavailable", message: reason };
+      notify(context, `Ignore: ${reason}`, "error");
+      flowChanged();
+      return { ok: false, error: current.error };
+    }
+    current.busy = "ignoring the file";
+    current.error = null;
+    flowChanged();
+    let result;
+    try {
+      result = await current.actions.addToGitignore({ cwd: current.directory, file: filePath });
+    } catch (error) {
+      // A rejected service call is reported like a refused one: the flow stays
+      // open with its choices, the busy flag clears, and the failure is named.
+      if (flow !== current) return null;
+      const detail =
+        typeof error?.message === "string" && error.message
+          ? error.message.slice(0, 200)
+          : "the ignore request failed";
+      current.busy = "";
+      current.error = { code: "ignore-failed", message: `the file could not be ignored: ${detail}` };
+      notify(context, `Ignore: ${current.error.message}`, "error");
+      flowChanged();
+      return { ok: false, error: current.error };
+    }
+    // A closed or replaced flow is never touched by a late answer.
+    if (flow !== current) return null;
+    current.busy = "";
+    if (!result?.ok) {
+      const error = result?.error ?? { code: "ignore-failed", message: "the file could not be ignored" };
+      current.error = error;
+      notify(context, `Ignore: ${error.message}`, "error");
+      flowChanged();
+      return result;
+    }
+    // "Added", not "Ignoring": a later nested rule in the same .gitignore can
+    // still override the added pattern, so the write is not a guarantee.
+    notify(context, `Added ${result.file ?? filePath} to .gitignore`, "info");
+    // Refresh the list, but keep the user's manual choices and the attribution
+    // notice. The ignored path is gone and never preselected; the new .gitignore
+    // entry is not checked for them either.
+    await loadSelection({
+      preserve: { selection: [...current.selection], notice: current.notice },
+    });
+    return result;
+  }
+
   async function runPreview() {
     const current = flow;
     if (!current || current.busy) return null;
@@ -917,13 +1198,13 @@ export function createRuntime({
     return true;
   }
 
-  // The only egress: the reviewed diff goes to the Copilot CLI to write a
-  // message. It runs only after the egress step was shown and approved, and the
+  // The only egress: the reviewed diff goes to the native Luna text API to write
+  // a message. It runs only after the egress step was shown and approved, and the
   // step guard is what keeps that true: the API cannot generate from the review.
   async function runGenerate() {
     const current = flow;
     if (!current || current.step !== "egress" || !current.token || current.busy) return null;
-    current.busy = "asking Copilot for a message";
+    current.busy = "generating with Luna";
     current.error = null;
     flowChanged();
     const result = await current.actions.generateMessage({
@@ -963,16 +1244,25 @@ export function createRuntime({
       text = undefined;
     }
     if (flow !== current) return null;
-    const trimmed = typeof text === "string" ? text.trim() : "";
-    if (trimmed) {
-      current.message = trimmed;
+    if (typeof text === "string" && text.trim()) {
+      current.message = text.trim();
       current.step = "confirm";
       current.error = null;
+      current.notice = "";
+    } else if (typeof text === "string") {
+      // The user cleared the draft on purpose. Committing the message they just
+      // deleted would be wrong, so the draft goes and nothing is committed.
+      current.message = "";
+      current.step = "preview";
+      current.error = null;
+      current.notice = "The message was cleared, so nothing was committed";
     } else if (!current.message) {
-      // No message and none typed: the commit cannot go ahead.
+      // Cancelled with no draft: the commit cannot go ahead.
       current.notice = "No message was set, so nothing was committed";
       current.step = "preview";
     } else {
+      // Cancelled with an existing draft: keep it for editing. Cancelling a
+      // prompt never commits on its own.
       current.step = "confirm";
     }
     mountFlow();
@@ -1061,6 +1351,7 @@ export function createRuntime({
     },
     state: flowState,
     toggle: toggleFile,
+    ignoreFile,
     back,
     cancel: () => closeFlow(),
     reload: () => loadSelection(),

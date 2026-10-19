@@ -362,42 +362,27 @@ function expectFullWidth(entry, label, width, frame = "frame") {
   return box;
 }
 
-// A lone button centres its label: the room left of the text matches the room
-// right of it. A paired label stays in the left column instead.
+// Every button centres its label: on each drawn text row the room left of the
+// glyphs matches the room right of them. A wrapped label is checked row by row,
+// so the rule holds whether the cell shares its row or fills it.
 function expectCentered(entry, label, frame = "frame") {
   const box = expectCell(entry, label, frame);
-  const text = nodesOf(entry, frame).find(
-    (each) =>
-      each.ctor === "TextRenderable" &&
-      each.label === label &&
-      each.y > box.y &&
-      each.y < box.y + box.h,
-  );
-  assert.ok(text, `${entry.name}: no text node for "${label}"`);
-  const left = text.x - (box.x + 1);
-  const right = box.x + box.w - 1 - (text.x + label.length);
-  assert.ok(
-    Math.abs(left - right) <= 2,
-    `${entry.name}: "${label}" is not centred (${left} columns left, ${right} right, cell x=${box.x} w=${box.w})`,
-  );
-  return box;
-}
-
-// A paired label keeps the left column.
-function expectLeftAligned(entry, label, frame = "frame") {
-  const box = expectCell(entry, label, frame);
-  const text = nodesOf(entry, frame).find(
-    (each) =>
-      each.ctor === "TextRenderable" &&
-      each.label === label &&
-      each.y > box.y &&
-      each.y < box.y + box.h,
-  );
-  assert.ok(text, `${entry.name}: no text node for "${label}"`);
-  assert.ok(
-    text.x <= box.x + 3,
-    `${entry.name}: paired "${label}" moved to column ${text.x} (cell x=${box.x})`,
-  );
+  const lines = entry.frames[frame].split("\n");
+  let rows = 0;
+  for (let y = box.y + 1; y < box.y + box.h - 1; y += 1) {
+    const inner = (lines[y] ?? "").slice(box.x + 1, box.x + box.w - 1);
+    const first = inner.search(/\S/);
+    if (first < 0) continue;
+    const trimmed = inner.replace(/\s+$/, "");
+    const left = first;
+    const right = inner.length - trimmed.length;
+    rows += 1;
+    assert.ok(
+      Math.abs(left - right) <= 2,
+      `${entry.name}: "${label}" row ${y} is not centred (${left} columns left, ${right} right, cell x=${box.x} w=${box.w})`,
+    );
+  }
+  assert.ok(rows > 0, `${entry.name}: "${label}" drew no text`);
   return box;
 }
 
@@ -499,9 +484,13 @@ describe("sidebar layout from a real render", () => {
     for (const width of [80, 60, 40, 30, 24, 20]) {
       const entry = measurement(`grid-singleton-${width}`);
       expectCellsWellFormed(entry);
+      // Built-in and utility labels centre whether they share a row or fill it.
       expectPair(entry, "Commit", "Push", width);
-      expectLeftAligned(entry, "Commit");
+      expectCentered(entry, "Commit");
+      expectCentered(entry, "Push");
       expectPair(entry, "Stop all", "Show logs", width);
+      expectCentered(entry, "Stop all");
+      expectCentered(entry, "Show logs");
       // The one action of the project takes the whole row.
       expectFullWidth(entry, "Next live", width);
       expectCentered(entry, "Next live");
@@ -513,10 +502,17 @@ describe("sidebar layout from a real render", () => {
     const pair = measurement("grid-pair-80");
     expectCellsWellFormed(pair);
     expectPair(pair, "Live web", "Next live", 80);
+    // Project commands centre in a shared row too, like the built-in controls.
+    expectCentered(pair, "Live web");
+    expectCentered(pair, "Next live");
     const five = measurement("grid-five-80");
     expectCellsWellFormed(five);
     expectPair(five, "Build", "Live mobile", 80);
+    expectCentered(five, "Build");
+    expectCentered(five, "Live mobile");
     expectPair(five, "Live web", "Next live", 80);
+    expectCentered(five, "Live web");
+    expectCentered(five, "Next live");
     // The odd fifth button takes the whole last row.
     expectFullWidth(five, "ADB install", 80);
     expectCentered(five, "ADB install");
@@ -528,6 +524,8 @@ describe("sidebar layout from a real render", () => {
       const entry = measurement(`grid-long-labels-${width}`);
       expectCellsWellFormed(entry);
       const [box] = expectPair(entry, "Build mobile (Expo)", "ADB install on emulator", width);
+      expectCentered(entry, "Build mobile (Expo)");
+      expectCentered(entry, "ADB install on emulator");
       assert.ok(box.h >= 3, `${entry.name}: label did not wrap (cell height ${box.h})`);
       const line = entry.frames.frame.split("\n")[box.y + 1];
       assert.ok(WALL.has(line[box.x]), `${entry.name}: wrapped cell lost its left wall`);
@@ -546,6 +544,7 @@ describe("sidebar layout from a real render", () => {
       const narrow = measurement(`grid-long-singleton-narrow-${width}`);
       expectCellsWellFormed(narrow);
       expectFullWidth(narrow, "ADB install on emulator", width);
+      expectCentered(narrow, "ADB install on emulator");
       expectNoTruncation(narrow, "ADB install on emulator");
     }
   });
@@ -1111,5 +1110,107 @@ describe("sidebar layout from a real render", () => {
       rowIndexOf(after, "[x] Live web") < rowIndexOf(after, "[x] Build"),
       `${entry.name}: the settings list did not reorder with the grid\n${after}`,
     );
+  });
+
+  test("the commit files step draws a ⊘ left of each file and explains it", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("git-files-70");
+    const frame = entry.frames.frame;
+    for (const path of ["src/new-notes.md", "src/app.js", "src/locked.bin"]) {
+      const row = frameLine(frame, path);
+      assert.ok(row.includes("⊘"), `${entry.name}: "${path}" has no ⊘\n${row}`);
+      assert.ok(
+        row.indexOf("⊘") < row.indexOf("[ ]"),
+        `${entry.name}: the ⊘ is not left of "${path}"\n${row}`,
+      );
+    }
+    assert.match(
+      frame.replace(/\s+/g, " "),
+      /only applies to untracked files/,
+      "the ⊘ column is not explained",
+    );
+  });
+
+  test("a click on the ⊘ ignores the untracked file and never selects it", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("git-files-ignore-70");
+    // One call, the ignore. No toggle, so the click never reached the row behind
+    // the control and the selection did not flip.
+    assert.deepEqual(
+      entry.calls,
+      [["ignoreFile", "src/new-notes.md"]],
+      `calls: ${JSON.stringify(entry.calls)}`,
+    );
+    const after = entry.frames["after-ignore"];
+    assert.ok(
+      frameLine(after, "src/new-notes.md").includes("[ ]"),
+      `the click selected the file\n${after}`,
+    );
+  });
+
+  test("a tracked file cannot be ignored", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("git-files-tracked-70");
+    assert.deepEqual(entry.calls, [], `a tracked file was ignored: ${JSON.stringify(entry.calls)}`);
+    // The control is still drawn, so the column reads as one thing.
+    assert.ok(
+      frameLine(entry.frames["after-tracked"], "src/app.js").includes("⊘"),
+      "the ⊘ vanished for a tracked file",
+    );
+  });
+
+  test("a blocked file cannot be ignored", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("git-files-blocked-70");
+    assert.deepEqual(entry.calls, [], `a blocked file was ignored: ${JSON.stringify(entry.calls)}`);
+    assert.ok(
+      frameLine(entry.frames["after-blocked"], "src/locked.bin").includes("⊘"),
+      "the ⊘ vanished for a blocked file",
+    );
+  });
+
+  test("a busy flow cannot ignore a file", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("git-files-busy-70");
+    assert.deepEqual(entry.calls, [], `a busy flow still ignored: ${JSON.stringify(entry.calls)}`);
+  });
+
+  test("a long path keeps its ⊘ left of the name and its cell walls", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("git-files-longpath-70");
+    const row = frameLine(entry.frames.frame, "src/features/checkout");
+    assert.ok(row.includes("⊘"), `${entry.name}: the long row lost its ⊘\n${row}`);
+    assert.ok(
+      row.indexOf("⊘") < row.indexOf("[ ]"),
+      `${entry.name}: the ⊘ is not left of the long name\n${row}`,
+    );
+    expectCellsWellFormed(entry);
+  });
+
+  test("the egress diff wraps instead of truncating a line past 200 columns", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("git-egress-longline-36");
+    const tail = "END-OF-LONG-DIFF-LINE-9f3c";
+    // Wrapping can split the marker across rows, and the scrollbar can sit at
+    // the right edge, so compare without whitespace or scrollbar cells.
+    const compact = (frame) => frame.replace(/[│█]/g, "").replace(/\s+/g, "");
+    // The tail starts below the fold: the lines before it fill the scrollbox,
+    // so the marker can only appear once the user scrolls down.
+    assert.ok(
+      !compact(entry.frames["before-scroll"]).includes(tail),
+      `the long line's tail is visible before scrolling\n${entry.frames["before-scroll"]}`,
+    );
+    const after = entry.frames["after-scroll"];
+    assert.ok(
+      compact(after).includes(tail),
+      `the long line's tail is not reachable by scrolling\n${after}`,
+    );
+    // The rest of the diff is still there, and no display-time ellipsis stands
+    // in for bytes that were never drawn.
+    assert.ok(
+      compact(after).includes("+shortlineafter"),
+      `the diff after the long line is missing\n${after}`,
+    );
+    assert.doesNotMatch(entry.frames["before-scroll"], /…/);
   });
 });

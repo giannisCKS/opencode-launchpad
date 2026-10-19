@@ -75,6 +75,7 @@ function createFakeSpawn() {
 
 function createContext({
   locationDirectory,
+  childDirectory = locationDirectory,
   sessions = {},
   route,
   diffFiles = {},
@@ -85,8 +86,21 @@ function createContext({
   messagesMalformed = false,
   messageDiffFiles = {},
   messageDiffThrows = false,
+  messageDiffThrowsFor = [],
   snapshotFiles = null,
   promptAnswers = [],
+  sessionChildren = {},
+  sessionListMissing = false,
+  sessionListThrows = false,
+  sessionListFailFor = [],
+  sessionListMalformed = false,
+  sessionListRecords = null,
+  sessionListGate = null,
+  generateReply = null,
+  generateThrows = false,
+  generateGate = null,
+  generateMissing = false,
+  generateMalformed = false,
 }) {
   const calls = {
     slots: [],
@@ -95,9 +109,11 @@ function createContext({
     layers: [],
     diffs: [],
     messages: [],
+    sessions: [],
     invalid: [],
     snapshots: [],
     prompts: [],
+    generates: [],
   };
   const context = {
     theme: {
@@ -191,12 +207,77 @@ function createContext({
               return { data: page, cursor: { previous: null, next } };
             },
           },
+      // Native Luna generation follows the confirmed host contract:
+      //   `client.generate.text({ prompt, model }, { signal })` -> `{ text }`.
+      // Any other shape is a regression, so a missing adapter throws loudly.
+      ...(generateMissing
+        ? {}
+        : {
+            generate: {
+              async text(payload, options) {
+                calls.generates.push({ payload, options });
+                if (generateMalformed) return { data: "not-text" };
+                if (generateGate) await generateGate(payload, options);
+                if (generateThrows) throw new Error("provider unavailable");
+                const reply =
+                  typeof generateReply === "function"
+                    ? generateReply(payload, options)
+                    : generateReply;
+                return { text: reply ?? "feat(web): tidy the header" };
+              },
+            },
+          }),
       session: {
         // A fabricated route: calling it is a regression.
         async messages() {
           calls.invalid.push("session.messages");
           throw new Error("session.messages is not part of the @opencode/client contract");
         },
+        // Native `parentID` child listing. `sessionChildren` maps a parent id to
+        // its direct children; a string entry becomes `{ id, parentID }`, an
+        // object entry is returned verbatim so a test can send a mismatched
+        // parentID. The cursor is opaque and paged like `message.list`.
+        ...(sessionListMissing
+          ? {}
+          : {
+              async list(options) {
+                calls.sessions.push(options);
+                for (const key of ["path", "sessionID", "before"]) {
+                  if (options?.[key] !== undefined) {
+                    throw new Error(`unsupported session list request key: ${key}`);
+                  }
+                }
+                if (typeof options?.parentID !== "string" || !options.parentID) {
+                  throw new Error("session list requires parentID");
+                }
+                if (options.cursor !== undefined && options.order !== undefined) {
+                  throw new Error("order must not be combined with cursor");
+                }
+                if (sessionListGate) await sessionListGate(options);
+                if (sessionListThrows || sessionListFailFor.includes(options.parentID)) {
+                  throw new Error("session list failed");
+                }
+                if (sessionListMalformed) return { data: "not-a-list" };
+                if (sessionListRecords) {
+                  const custom = sessionListRecords(options);
+                  if (custom) return custom;
+                }
+                const source = sessionChildren[options.parentID] ?? [];
+                const records = source.map((entry) =>
+                  typeof entry === "string"
+                    ? { id: entry, parentID: options.parentID, directory: childDirectory }
+                    : entry,
+                );
+                const at = typeof options.cursor === "string" ? Number(options.cursor.slice(1)) : 0;
+                if (typeof options.cursor === "string" && !Number.isInteger(at)) {
+                  throw new Error("bad cursor");
+                }
+                const limit = typeof options.limit === "number" ? options.limit : records.length;
+                const page = records.slice(at, at + limit);
+                const next = at + limit < records.length ? `c${at + limit}` : null;
+                return { data: page, cursor: { previous: null, next } };
+              },
+            }),
         async diff(options) {
           calls.diffs.push(options);
           for (const key of ["path", "directory", "messageID", "before"]) {
@@ -206,6 +287,9 @@ function createContext({
           }
           if (diffThrows) throw new Error("session diff failed");
           if (options?.from !== undefined && messageDiffThrows) throw new Error("message diff failed");
+          if (options?.from !== undefined && messageDiffThrowsFor.includes(options.from)) {
+            throw new Error("message diff failed");
+          }
           const files =
             options?.from !== undefined
               ? (messageDiffFiles[options.from] ?? [])
@@ -267,9 +351,9 @@ function messageTurn(id, created) {
   return { id, type: "user", time: { created }, text: "" };
 }
 
-// A scripted `git` (and `copilot`) so the real service runs end to end without a
-// repository, a network call, or a Copilot invocation. Every command is answered
-// by shape, and anything unexpected fails the test loudly.
+// A scripted `git` so the real service runs end to end without a repository or a
+// network call. Every command is answered by shape, and anything unexpected —
+// including a non-git subprocess — fails the test loudly.
 function fakeGit(options = {}) {
   const root = options.root ?? "/repo";
   const branch = options.branch ?? "main";
@@ -278,7 +362,6 @@ function fakeGit(options = {}) {
   const status = options.status ?? "";
   const patch = options.patch ?? "diff --git a/src/a.ts b/src/a.ts\n+one line\n";
   const stat = options.stat ?? " src/a.ts | 1 +\n 1 file changed, 1 insertion(+)\n";
-  const message = options.message ?? "feat(web): tidy the header\n";
   const calls = [];
   let head = options.head ?? "head1";
   let committedOnce = false;
@@ -288,7 +371,7 @@ function fakeGit(options = {}) {
   const exec = async ({ file, args, cwd, env, input }) => {
     const line = args.join(" ");
     calls.push({ file, args, cwd, env, input });
-    if (file !== "git") return ok(message);
+    if (file !== "git") return bad(1, `unexpected non-git command: ${file}`);
     if (line === "rev-parse --show-toplevel") {
       if (options.notARepo) return bad(128, "fatal: not a git repository");
       return ok(`${root}\n`);
@@ -994,8 +1077,9 @@ test("sidebar buttons are frames with no fill and a readable label", () => {
   assert.match(sidebar, /pairs\.push\(\[list\[index\], list\[index \+ 1\]\]\)/);
   assert.match(sidebar, /<Index each=\{rows\(\)\}>/);
   assert.match(sidebar, /<Index each=\{cells\(\)\}>/);
-  // A lone button fills the row and centers its label, without an empty slot.
-  assert.match(sidebar, /centered=\{cells\(\)\.length === 1\}/);
+  // Every button centres its own label, so a row needs no centring flag, and a
+  // lone button fills the row without an empty slot.
+  assert.doesNotMatch(sidebar, /centered=/);
   assert.doesNotMatch(sidebar, /fallback=\{<box flexGrow=\{1\} flexBasis=\{0\} \/>\}/);
   // Nothing paints a background: the sidebar background is the button background.
   assert.doesNotMatch(source, /backgroundColor=/);
@@ -1012,10 +1096,16 @@ test("sidebar buttons are frames with no fill and a readable label", () => {
   assert.match(button, /const row = \(\) => props\.cell\(\);/);
   assert.doesNotMatch(button, /const \{ cell \}/);
 
-  // Label only: no status prefix or suffix stealing width, and it wraps
-  // instead of clipping.
-  assert.match(button, /wrapMode="word"/);
-  assert.match(button, /\{row\(\)\?\.action\.label \?\? ""\}/);
+  // Label only: no status prefix or suffix stealing width. One renderer owns
+  // the label for every cell, so a lone button, a paired button and a control
+  // all read the same, and a long label wraps instead of clipping.
+  const label = functionBody(source, "function CellLabel");
+  assert.match(button, /<CellLabel[^>]*label=\{row\(\)\?\.action\.label \?\? ""\}/);
+  assert.match(label, /flexWrap="wrap"/);
+  assert.match(label, /justifyContent="center"/);
+  assert.match(label, /wrapMode="char"/);
+  assert.doesNotMatch(label, /truncate/);
+  assert.doesNotMatch(label, /wrapMode="none"/);
   assert.doesNotMatch(button, /truncate/);
   assert.doesNotMatch(button, /wrapMode="none"/);
   assert.doesNotMatch(button, /elapsedText|suffix|\bdot\b/);
@@ -1067,6 +1157,7 @@ test("sidebar buttons are frames with no fill and a readable label", () => {
   assert.match(sidebar, /disabled=\{!board\(\)\.canLog\}/);
   assert.match(sidebar, /onPress=\{\(\) => runtime\.showLog\(\)\}/);
   const utility = functionBody(source, "function UtilityButton");
+  assert.match(utility, /<CellLabel[^>]*label=\{props\.label\}/);
   assert.match(utility, /controlVisual\(theme, \{ disabled: props\.disabled, hovered: hover\(\) \}\)/);
   assert.doesNotMatch(utility, /buttonVisual/);
 });
@@ -1625,7 +1716,7 @@ test("the commit flow reviews the exact patch before anything is written", async
   await flow.approveEgress();
   await until(() => calls.prompts.length === 1, "the message prompt");
   assert.equal(calls.prompts[0].title, "Commit message");
-  // Copilot's raw suggestion carries a Conventional Commit prefix, which is
+  // The model's raw suggestion carries a Conventional Commit prefix, which is
   // stripped before the user reviews it; the confirmed text is what commits.
   assert.equal(calls.prompts[0].value, "tidy the header");
   // The prompt is a plain descriptive subject and never models a type prefix.
@@ -1643,12 +1734,18 @@ test("the commit flow reviews the exact patch before anything is written", async
   assert.equal(flow.state().step, "confirm");
   assert.equal(flow.state().message, "tidy the header");
 
-  const copilot = exec.calls.filter((call) => call.file !== "git");
-  assert.equal(copilot.length, 1, "the diff was sent once");
-  assert.equal(copilot[0].input, flow.state().preview.diff);
-  assert.equal(copilot[0].cwd.startsWith(tmpRoot), true, "sent from the review folder");
-  assert.equal(copilot[0].cwd === dir, false);
-  assert.equal(copilot[0].env.COPILOT_ALLOW_ALL, undefined);
+  // The diff left the machine exactly once, through the native Luna adapter.
+  assert.equal(calls.generates.length, 1, "the diff was sent once");
+  const [{ payload, options }] = calls.generates;
+  assert.deepEqual(
+    payload.model,
+    { providerID: "opencodex", id: "gpt-6-luna", variant: "low" },
+    "the native adapter targets Luna at the low variant",
+  );
+  assert.equal(payload.prompt.includes(flow.state().preview.diff), true, "the frozen diff is the payload");
+  // No subprocess and no session/tool traffic carries the diff.
+  assert.equal(exec.calls.filter((call) => call.file !== "git").length, 0, "no subprocess");
+  assert.equal(options?.signal instanceof AbortSignal, true, "a cancellable signal is passed");
 
   await flow.confirm();
   await until(() => flow.state() === null, "the dialog to close");
@@ -1659,6 +1756,204 @@ test("the commit flow reviews the exact patch before anything is written", async
   assert.equal(calls.dialogs.at(-1).clear, true);
 
   await cleanup();
+});
+
+// Mount a session's commit flow on a scripted git and an injected native
+// generator, stopping at the egress step so a test can approve it and inspect
+// exactly what left the machine.
+async function startCommitFlow(options = {}) {
+  const dir = options.dir ?? scriptsFixture();
+  const tmpRoot = options.tmpRoot ?? path.join(dir, "git-tmp");
+  const status = options.status ?? "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0";
+  const exec = options.exec ?? fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    diffFiles: { s1: ["src/a.ts"] },
+    ...(options.context ?? {}),
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  await flow.previewSelection();
+  flow.askEgress();
+  return { dir, tmpRoot, exec, context, calls, runtime, flow, cleanup };
+}
+
+test("the commit message is written by native Luna while the flow says it is busy", async () => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const flowTest = await startCommitFlow({
+    context: { generateGate: () => gate },
+  });
+  const { calls, flow } = flowTest;
+  const frozen = flow.state().preview.diff;
+
+  const running = flow.approveEgress();
+  await until(() => calls.generates.length === 1, "the native generation call");
+
+  // The status line names the model and no prompt opens before it answers.
+  assert.equal(flow.state().busy, "generating with Luna");
+  assert.equal(calls.prompts.length, 0, "no message is shown before the model answers");
+  assert.equal(flow.state().step, "egress", "the flow is still on the egress step");
+
+  const [{ payload, options }] = calls.generates;
+  assert.deepEqual(payload.model, { providerID: "opencodex", id: "gpt-6-luna", variant: "low" });
+  assert.equal(payload.prompt.includes(frozen), true, "the frozen selected diff is the payload");
+  assert.equal(
+    payload.prompt.includes("----- BEGIN DIFF -----") && payload.prompt.includes("----- END DIFF -----"),
+    true,
+    "the diff is delimited",
+  );
+  assert.match(payload.prompt, /untrusted/i, "the diff is marked as untrusted data");
+  assert.equal(options?.signal instanceof AbortSignal, true);
+
+  release();
+  await running;
+  await until(() => calls.prompts.length === 1, "the message prompt");
+  assert.equal(flow.state().busy, "");
+  assert.equal(calls.prompts[0].value, "tidy the header", "the review prefix was stripped");
+
+  flow.cancel();
+  await flowTest.cleanup();
+});
+
+test("a failed generation is named and leaves the review usable", async () => {
+  const flowTest = await startCommitFlow({
+    context: { generateThrows: true },
+  });
+  const { calls, flow } = flowTest;
+
+  const result = await flow.approveEgress();
+  assert.equal(result?.ok, false);
+  assert.equal(result.error.code, "generation-failed");
+  // The provider's own words can quote the diff, so the user sees a safe
+  // diagnostic instead: the raw message never reaches the dashboard.
+  assert.equal(result.error.message, "Luna message generation failed");
+  assert.equal(JSON.stringify(flow.state()).includes("provider unavailable"), false);
+  assert.equal(flow.state().step, "preview", "the review comes back, not a dead end");
+  assert.equal(flow.state().error.code, "generation-failed");
+  assert.equal(calls.prompts.length, 0, "no message prompt opens on failure");
+  assert.equal(calls.generates.length, 1, "the model was asked exactly once");
+
+  flow.cancel();
+  await flowTest.cleanup();
+});
+
+test("an unusable model answer is refused rather than shown", async () => {
+  for (const context of [{ generateMalformed: true }, { generateReply: "   " }]) {
+    const flowTest = await startCommitFlow({ context });
+    const { calls, flow } = flowTest;
+
+    const result = await flow.approveEgress();
+    assert.equal(result?.ok, false);
+    assert.equal(result.error.code, "empty-message");
+    assert.equal(calls.prompts.length, 0, "no blank commit message is ever offered");
+    assert.equal(flow.state().step, "preview");
+
+    flow.cancel();
+    await flowTest.cleanup();
+  }
+});
+
+test("a missing native generator is reported, never replaced by a subprocess", async () => {
+  const flowTest = await startCommitFlow({ context: { generateMissing: true } });
+  const { calls, exec, flow } = flowTest;
+
+  const result = await flow.approveEgress();
+  assert.equal(result?.ok, false);
+  assert.equal(result.error.code, "generation-unavailable");
+  assert.equal(result.error.message, "No commit message generator is connected");
+  assert.equal(exec.calls.filter((call) => call.file !== "git").length, 0, "no subprocess fallback");
+  assert.equal(flow.state().step, "preview");
+
+  flow.cancel();
+  await flowTest.cleanup();
+});
+
+test("a generated subject and body keep their blank separator through to the commit", async () => {
+  const flowTest = await startCommitFlow({
+    context: {
+      // A drafted subject plus body, as the model returns it.
+      generateReply: "add the header\n\nBody explains why.\n",
+      // The user accepts the draft as-is.
+      promptAnswers: [(options) => options.value],
+    },
+  });
+  const { calls, flow, exec } = flowTest;
+
+  await flow.approveEgress();
+  await until(() => calls.prompts.length === 1, "the message prompt");
+  assert.equal(
+    calls.prompts[0].value,
+    "add the header\n\nBody explains why.",
+    "the internal blank line survives, only the outer newline is trimmed",
+  );
+  assert.equal(flow.state().step, "confirm");
+  assert.equal(flow.state().message, calls.prompts[0].value);
+
+  await flow.confirm();
+  await until(() => flow.state() === null, "the dialog to close");
+  const committed = exec.commands().find((line) => line.startsWith("commit -m"));
+  assert.equal(committed, "commit -m add the header\n\nBody explains why.");
+
+  await flowTest.cleanup();
+});
+
+test("clearing the message drops the draft and commits nothing", async () => {
+  for (const answer of ["", "   "]) {
+    const flowTest = await startCommitFlow({ context: { promptAnswers: [answer] } });
+    const { calls, flow, exec } = flowTest;
+
+    await flow.approveEgress();
+    await until(() => calls.prompts.length === 1, "the message prompt");
+    assert.equal(calls.prompts[0].value, "tidy the header", "the generated draft is offered");
+    assert.equal(flow.state().message, "", "an explicit clear really clears it");
+    assert.equal(flow.state().step, "preview", "the flow goes back, it does not commit");
+    assert.match(flow.state().notice, /cleared/i);
+    assert.equal(flow.state().error, null);
+    assert.equal(await flow.confirm(), null, "there is nothing to confirm");
+    assert.equal(
+      exec.commands().some((line) => line.startsWith("commit")),
+      false,
+      "a deleted message never commits",
+    );
+
+    flow.cancel();
+    await flowTest.cleanup();
+  }
+});
+
+test("cancelling the message prompt keeps the draft and still never commits", async () => {
+  const flowTest = await startCommitFlow({
+    // No answer at all: the host prompt was dismissed.
+    context: { promptAnswers: [] },
+  });
+  const { calls, flow, exec } = flowTest;
+
+  const returned = await flow.approveEgress();
+  await until(() => calls.prompts.length === 1, "the message prompt");
+  assert.equal(returned, "tidy the header", "the draft is returned for editing");
+  assert.equal(flow.state().step, "confirm");
+  assert.equal(flow.state().message, "tidy the header", "the draft is kept");
+  assert.equal(
+    exec.commands().some((line) => line.startsWith("commit")),
+    false,
+    "cancelling a prompt never commits on its own",
+  );
+
+  flow.cancel();
+  await flowTest.cleanup();
 });
 
 test("the review default checks only confirmed session changes, never unsafe ones", async () => {
@@ -2548,6 +2843,720 @@ test("a history beyond the page cap warns instead of silently dropping turns", a
   await cleanup();
 });
 
+test("a child and grandchild session contribute only their own confirmed files", async () => {
+  const dir = scriptsFixture();
+  const status =
+    "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? child.txt\0? grand.txt\0? other.txt\0";
+  const exec = fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir }, c1: { directory: dir }, g1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: {
+      s1: [messageTurn("u1", 100)],
+      c1: [messageTurn("cu1", 100)],
+      g1: [messageTurn("gu1", 100)],
+    },
+    messageDiffFiles: { u1: ["root.ts"], cu1: ["child.txt"], gu1: ["grand.txt"] },
+    sessionChildren: { s1: ["c1"], c1: ["g1"] },
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  // Each session is read with its own messages/from and the captured directory.
+  assert.deepEqual(calls.sessions, [
+    { parentID: "s1", limit: 20 },
+    { parentID: "c1", limit: 20 },
+    { parentID: "g1", limit: 20 },
+  ]);
+  assert.deepEqual(calls.messages, [
+    { sessionID: "s1", limit: 100, type: "user", order: "asc" },
+    { sessionID: "c1", limit: 100, type: "user", order: "asc" },
+    { sessionID: "g1", limit: 100, type: "user", order: "asc" },
+  ]);
+  assert.deepEqual(calls.diffs, [
+    { sessionID: "s1", from: "u1" },
+    { sessionID: "c1", from: "cu1" },
+    { sessionID: "g1", from: "gu1" },
+  ]);
+  assert.deepEqual(
+    [...flow.state().selection].sort(),
+    ["child.txt", "grand.txt", "root.ts"],
+    "the root, its child, and its grandchild are all attributed",
+  );
+  assert.deepEqual(
+    flow.state().files.map((file) => [file.path, file.session]),
+    [
+      ["root.ts", true],
+      ["child.txt", true],
+      ["grand.txt", true],
+      ["other.txt", false],
+    ],
+    "a file outside the tree stays unattributed",
+  );
+  assert.equal(flow.state().notice, "", "a complete child walk needs no warning");
+
+  await cleanup();
+});
+
+test("an OMO slim child uses the same native parentID representation", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? omo.txt\0";
+  const exec = fakeGit({ root: dir, status });
+  // OMO slim creates the child through the native session route, so the listing
+  // returns full `SessionInfo` records carrying `parentID` - no OMO-only shape.
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: {
+      s1: [messageTurn("u1", 100)],
+      "ses-omo-1": [messageTurn("ou1", 100)],
+    },
+    messageDiffFiles: { u1: ["root.ts"], ou1: ["omo.txt"] },
+    sessionChildren: {
+      s1: [
+        {
+          id: "ses-omo-1",
+          parentID: "s1",
+          projectID: "proj-1",
+          title: "OMO slim child",
+          time: { created: 1, updated: 2 },
+          location: { directory: dir },
+        },
+      ],
+    },
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.deepEqual(calls.sessions, [
+    { parentID: "s1", limit: 20 },
+    { parentID: "ses-omo-1", limit: 20 },
+  ]);
+  assert.deepEqual([...flow.state().selection].sort(), ["omo.txt", "root.ts"]);
+  assert.equal(flow.state().notice, "");
+
+  await cleanup();
+});
+
+test("a session outside the parentID tree is never traversed or attributed", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? kept.txt\0? foreign.txt\0? worse.txt\0";
+  const exec = fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir }, other: { directory: dir }, evil: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: {
+      s1: [messageTurn("u1", 100)],
+      c1: [messageTurn("cu1", 100)],
+      other: [messageTurn("ou1", 100)],
+      evil: [messageTurn("eu1", 100)],
+    },
+    messageDiffFiles: { u1: ["root.ts"], cu1: ["kept.txt"], ou1: ["foreign.txt"], eu1: ["worse.txt"] },
+    sessionChildren: {
+      // A record claiming another parent is not a child of `s1`. A non-string id
+      // is not a session, and a deeper record claiming `s1` is not a child of `c1`.
+      s1: [
+        "c1",
+        { id: "other", parentID: "other" },
+        { id: "evil", parentID: "s1 " },
+        { id: 42, parentID: "s1" },
+      ],
+      c1: [{ id: "evil", parentID: "s1" }],
+    },
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.deepEqual(calls.sessions, [
+    { parentID: "s1", limit: 20 },
+    { parentID: "c1", limit: 20 },
+  ]);
+  assert.deepEqual(
+    calls.messages.map((request) => request.sessionID),
+    ["s1", "c1"],
+    "only the root and its exact child are read",
+  );
+  assert.deepEqual([...flow.state().selection].sort(), ["kept.txt", "root.ts"]);
+  assert.deepEqual(
+    flow.state().files.map((file) => [file.path, file.session]),
+    [
+      ["root.ts", true],
+      ["kept.txt", true],
+      ["foreign.txt", false],
+      ["worse.txt", false],
+    ],
+    "cross-parent and malformed records attribute nothing",
+  );
+
+  await cleanup();
+});
+
+test("a long child list is paged with the opaque cursor", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? late.txt\0";
+  const exec = fakeGit({ root: dir, status });
+  const children = [];
+  for (let i = 0; i < 45; i += 1) children.push(`c${i}`);
+  const messageItems = { s1: [messageTurn("u1", 100)], c44: [messageTurn("cu44", 100)] };
+  const messageDiffFiles = { u1: ["root.ts"], cu44: ["late.txt"] };
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems,
+    messageDiffFiles,
+    sessionChildren: { s1: children },
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.deepEqual(
+    calls.sessions.filter((request) => request.parentID === "s1"),
+    [
+      { parentID: "s1", limit: 20 },
+      { parentID: "s1", limit: 20, cursor: "c20" },
+      { parentID: "s1", limit: 20, cursor: "c40" },
+    ],
+    "the child walk follows cursor.next",
+  );
+  assert.deepEqual(
+    [...flow.state().selection].sort(),
+    ["late.txt", "root.ts"],
+    "a child from the last page is still attributed",
+  );
+  assert.equal(flow.state().notice, "");
+
+  await cleanup();
+});
+
+test("duplicate and cyclic child records are visited once", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? deep.txt\0";
+  const exec = fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: { s1: [messageTurn("u1", 100)], g1: [messageTurn("gu1", 100)] },
+    messageDiffFiles: { u1: ["root.ts"], gu1: ["deep.txt"] },
+    sessionChildren: {
+      // The same child appears three times, and the child lists the root back.
+      s1: ["c1", "c1", { id: "c1", parentID: "s1" }],
+      c1: ["g1", "s1"],
+      g1: ["c1", "g1"],
+    },
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.deepEqual(
+    calls.sessions.map((request) => request.parentID),
+    ["s1", "c1", "g1"],
+    "a duplicate or a cycle never re-opens a session",
+  );
+  assert.deepEqual([...flow.state().selection].sort(), ["deep.txt", "root.ts"]);
+  assert.equal(flow.state().notice, "");
+
+  await cleanup();
+});
+
+test("a failed grandchild listing keeps the root and confirmed children and warns", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? child.txt\0? sibling.txt\0? lost.txt\0";
+  const exec = fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: {
+      s1: [messageTurn("u1", 100)],
+      c1: [messageTurn("cu1", 100)],
+      c2: [messageTurn("cu2", 100)],
+      g1: [messageTurn("gu1", 100)],
+    },
+    messageDiffFiles: {
+      u1: ["root.ts"],
+      cu1: ["child.txt"],
+      cu2: ["sibling.txt"],
+      gu1: ["lost.txt"],
+    },
+    sessionChildren: { s1: ["c1", "c2"], c1: ["g1"] },
+    // The child is read; listing its own children is what fails.
+    sessionListFailFor: ["c1"],
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.deepEqual(
+    [...flow.state().selection].sort(),
+    ["child.txt", "root.ts", "sibling.txt"],
+    "the root and the children that did read are kept",
+  );
+  assert.match(
+    flow.state().notice,
+    /Child session changes could not be read/,
+    "the partial child read is disclosed",
+  );
+  assert.deepEqual(flow.state().files.map((file) => [file.path, file.session]), [
+    ["root.ts", true],
+    ["child.txt", true],
+    ["sibling.txt", true],
+    ["lost.txt", false],
+  ]);
+
+  await cleanup();
+});
+
+test("a malformed child list response keeps the root attribution and warns", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0";
+  const exec = fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: { s1: [messageTurn("u1", 100)] },
+    messageDiffFiles: { u1: ["root.ts"] },
+    sessionListMalformed: true,
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.deepEqual(flow.state().selection, ["root.ts"], "the root is never erased by a bad child page");
+  assert.match(flow.state().notice, /Child session changes could not be read/);
+  assert.doesNotMatch(
+    flow.state().notice,
+    /larger than one read/,
+    "a failed page is not misreported as a size limit",
+  );
+
+  await cleanup();
+});
+
+test("a child cursor that does not advance stops the walk and warns", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? other.txt\0";
+  const exec = fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: { s1: [messageTurn("u1", 100)], c1: [messageTurn("cu1", 100)] },
+    messageDiffFiles: { u1: ["root.ts"], cu1: ["other.txt"] },
+    sessionChildren: { s1: ["c1"] },
+    // The first page hides `c1` behind a cursor that never advances.
+    sessionListRecords: (options) =>
+      options.parentID === "s1" ? { data: [], cursor: { previous: null, next: "c0" } } : null,
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.deepEqual(flow.state().selection, ["root.ts"], "an unmoving cursor cannot loop or invent children");
+  assert.equal(calls.sessions.length, 1, "the page is asked once and then abandoned");
+  assert.match(flow.state().notice, /larger than one read/, "the dropped page is stated");
+
+  await cleanup();
+});
+
+test("a child tree beyond the node cap warns instead of silently truncating", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0";
+  const exec = fakeGit({ root: dir, status });
+  const children = [];
+  const sessionChildren = {};
+  for (let i = 0; i < 60; i += 1) {
+    children.push(`c${i}`);
+    sessionChildren[`c${i}`] = [`g${i}`];
+  }
+  sessionChildren.s1 = children;
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: { s1: [messageTurn("u1", 100)] },
+    messageDiffFiles: { u1: ["root.ts"] },
+    sessionChildren,
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.equal(calls.sessions.length, 43, "the walk stops at the node cap (3 pages for the root)");
+  assert.match(
+    flow.state().notice,
+    /larger than one read/,
+    "the unvisited tail of the tree is stated, not dropped silently",
+  );
+
+  await cleanup();
+});
+
+test("the child walk uses the captured session and directory after a tab switch", async () => {
+  const first = scriptsFixture();
+  const second = fixture({ "package.json": { scripts: {} }, "local-public-defines.json": "{}" });
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? child.txt\0";
+  const exec = fakeGit({ root: first, status });
+  let session = "s1";
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const { context, calls } = createContext({
+    locationDirectory: first,
+    sessions: { s1: { directory: first }, s2: { directory: second } },
+    route: () => ({ type: "session", sessionID: session }),
+    messageItems: {
+      s1: [messageTurn("u1", 100)],
+      c1: [messageTurn("cu1", 100)],
+      s2: [messageTurn("su1", 100)],
+    },
+    messageDiffFiles: { u1: ["root.ts"], cu1: ["child.txt"], su1: ["foreign.txt"] },
+    sessionChildren: { s1: ["c1"], s2: ["x1"] },
+    sessionListGate: async () => {
+      await gate;
+    },
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(first, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => calls.sessions.length >= 1, "the child listing to start");
+  // The user switches tabs while the child walk is in flight.
+  session = "s2";
+  release();
+  await until(() => flow.state()?.step === "files", "the file list");
+
+  assert.deepEqual(
+    calls.sessions.map((request) => request.parentID),
+    ["s1", "c1"],
+    "every child request uses the captured session tree, and none filters by folder",
+  );
+  for (const request of calls.sessions) {
+    assert.equal("directory" in request, false, "the list query never filters by folder");
+  }
+  assert.deepEqual(
+    calls.messages.map((request) => request.sessionID),
+    ["s1", "c1"],
+    "the newly active session is never read into the open flow",
+  );
+  assert.deepEqual([...flow.state().selection].sort(), ["child.txt", "root.ts"]);
+
+  await cleanup();
+});
+
+test("a host without session.list keeps the root attribution and warns", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? other.txt\0";
+  const exec = fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: { s1: [messageTurn("u1", 100)] },
+    messageDiffFiles: { u1: ["root.ts"] },
+    sessionListMissing: true,
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  // A host from before the child route still attributes the root; it says that
+  // children were not seen instead of silently keeping the root alone.
+  assert.deepEqual(flow.state().selection, ["root.ts"]);
+  assert.match(
+    flow.state().notice,
+    /Child sessions cannot be listed on this host/,
+    "the missing child route is disclosed",
+  );
+
+  await cleanup();
+});
+
+test("a child in another folder is skipped and named in the warning", async () => {
+  const dir = scriptsFixture();
+  const other = fixture({ "package.json": { scripts: {} }, "local-public-defines.json": "{}" });
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? local.txt\0";
+  const exec = fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir }, c1: { directory: other } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: { s1: [messageTurn("u1", 100)], c1: [messageTurn("cu1", 100)] },
+    messageDiffFiles: { u1: ["root.ts"], cu1: ["local.txt"] },
+    sessionChildren: { s1: [{ id: "c1", parentID: "s1", directory: other }] },
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  // The list query never filters by folder, so the child is discovered; its own
+  // folder does not match the captured one, so its same-named file is not taken.
+  assert.deepEqual(calls.sessions.map((request) => request.parentID), ["s1"]);
+  assert.deepEqual(calls.messages.map((request) => request.sessionID), ["s1"]);
+  assert.deepEqual(flow.state().selection, ["root.ts"]);
+  assert.deepEqual(
+    flow.state().files.map((file) => [file.path, file.session]),
+    [
+      ["root.ts", true],
+      ["local.txt", false],
+    ],
+    "a file named by another folder's session stays unattributed",
+  );
+  assert.match(flow.state().notice, /other or unverified folders were skipped/);
+
+  await cleanup();
+});
+
+test("a child without a verifiable folder is skipped and warned", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? loc.txt\0? ghost.txt\0";
+  const exec = fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: {
+      s1: { directory: dir },
+      c1: { directory: dir },
+      c2: { directory: dir },
+      c3: { directory: dir },
+    },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: {
+      s1: [messageTurn("u1", 100)],
+      c1: [messageTurn("cu1", 100)],
+      c2: [messageTurn("cu2", 100)],
+      c3: [messageTurn("cu3", 100)],
+    },
+    messageDiffFiles: {
+      u1: ["root.ts"],
+      cu1: ["ghost.txt"],
+      cu2: ["ghost.txt"],
+      cu3: ["loc.txt"],
+    },
+    sessionChildren: {
+      s1: [
+        // No folder at all: unverifiable, so the record is not followed.
+        { id: "c1", parentID: "s1" },
+        // A folder that is not a string is unverifiable too.
+        { id: "c2", parentID: "s1", directory: 42 },
+        // `location.directory` is the accepted second shape.
+        { id: "c3", parentID: "s1", location: { directory: dir } },
+      ],
+    },
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.deepEqual(
+    calls.messages.map((request) => request.sessionID),
+    ["s1", "c3"],
+    "only the folder-verified child is read",
+  );
+  assert.deepEqual([...flow.state().selection].sort(), ["loc.txt", "root.ts"]);
+  assert.deepEqual(
+    flow.state().files.find((file) => file.path === "ghost.txt").session,
+    false,
+    "an unverifiable child's file is never attributed",
+  );
+  assert.match(flow.state().notice, /other or unverified folders were skipped/);
+
+  await cleanup();
+});
+
+test("the depth probe honours a child page that cannot advance", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? other.txt\0";
+  const exec = fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: {
+      s1: { directory: dir },
+      c1: { directory: dir },
+      c2: { directory: dir },
+      c3: { directory: dir },
+      c4: { directory: dir },
+    },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: { s1: [messageTurn("u1", 100)] },
+    messageDiffFiles: { u1: ["root.ts"] },
+    sessionChildren: { s1: ["c1"], c1: ["c2"], c2: ["c3"], c3: ["c4"] },
+    // At the depth cap the probe sees a cursor that never adds a child.
+    sessionListRecords: (options) =>
+      options.parentID === "c4" ? { data: [], cursor: { previous: null, next: "c9" } } : null,
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.deepEqual(
+    calls.sessions.map((request) => request.parentID),
+    ["s1", "c1", "c2", "c3", "c4"],
+    "the deepest confirmed node is probed once",
+  );
+  assert.deepEqual(flow.state().selection, ["root.ts"]);
+  assert.match(
+    flow.state().notice,
+    /child session tree is larger than one read/,
+    "an unadvanced cursor is disclosed as a size limit, not as a read failure",
+  );
+  assert.doesNotMatch(flow.state().notice, /could not be read/);
+
+  await cleanup();
+});
+
+test("a malformed child page keeps the children already confirmed and warns", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? child.txt\0? other.txt\0";
+  const exec = fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir }, c1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: { s1: [messageTurn("u1", 100)], c1: [messageTurn("cu1", 100)] },
+    messageDiffFiles: { u1: ["root.ts"], cu1: ["child.txt"] },
+    sessionListRecords: (options) => {
+      if (options.parentID !== "s1") return null;
+      if (options.cursor === "c20") return { data: "not-a-list" };
+      return {
+        data: [{ id: "c1", parentID: "s1", directory: dir }],
+        cursor: { previous: null, next: "c20" },
+      };
+    },
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.deepEqual(
+    calls.sessions.map((request) => [request.parentID, request.cursor ?? null]),
+    [
+      ["s1", null],
+      ["s1", "c20"],
+      ["c1", null],
+    ],
+    "the walk stops at the malformed page",
+  );
+  assert.deepEqual([...flow.state().selection].sort(), ["child.txt", "root.ts"]);
+  assert.match(flow.state().notice, /Child session changes could not be read/);
+
+  await cleanup();
+});
+
 test("a confirmed session change that git blocks is never preselected", async () => {
   const dir = scriptsFixture();
   symlinkSync("/etc/hostname", path.join(dir, "escape"));
@@ -2676,6 +3685,404 @@ test("a repository that cannot be read closes the dialog and says why", async ()
   assert.equal(calls.toasts.at(-1).variant, "error");
   assert.match(calls.toasts.at(-1).message, /^Commit: /);
   assert.equal(calls.dialogs.at(-1).clear, true);
+
+  await cleanup();
+});
+
+// A minimal injected service for the ignore lane. `status` is answered from
+// `files` (the list may change between refreshes), `preview` is present so the
+// commit flow opens, and every ignore write is recorded instead of touching a
+// repository. The real service's own ignore tests live in git.test.js.
+function ignoreService({ root, files, onAgitignore, statusFiles } = {}) {
+  const calls = { status: [], ignore: [], preview: 0 };
+  let current = files;
+  const git = {
+    async status() {
+      calls.status.push(root);
+      const list = statusFiles ? statusFiles(calls.status.length) : current;
+      return {
+        ok: true,
+        root,
+        branch: "main",
+        detached: false,
+        head: "h1",
+        upstream: null,
+        ahead: null,
+        files: list,
+        candidates: [],
+        unattributed: [],
+        statusHash: "hash",
+      };
+    },
+    async preview() {
+      calls.preview += 1;
+      return { ok: true, token: "t1", files: [], diff: "", diffTruncated: false, diffUnavailable: false, stat: "" };
+    },
+    async addToGitignore(input) {
+      calls.ignore.push(input);
+      if (onAgitignore) return onAgitignore(input, calls.status.length);
+      return { ok: true, file: input.file, root: input.cwd };
+    },
+    discard() {
+      return { ok: true };
+    },
+  };
+  return { git, calls, setFiles: (next) => { current = next; } };
+}
+
+function gitFile(path, extra = {}) {
+  return { path, status: "untracked", session: false, unattributed: true, blocked: null, ...extra };
+}
+
+test("the ignore action writes the click-time folder, not the active tab", async () => {
+  const first = scriptsFixture();
+  const second = fixture({ "package.json": { scripts: {} }, "local-public-defines.json": "{}" });
+  let session = "s1";
+  const { git, calls: gitCalls } = ignoreService({
+    root: first,
+    files: [gitFile("notes.txt")],
+  });
+  const { context, calls } = createContext({
+    locationDirectory: first,
+    sessions: { s1: { directory: first }, s2: { directory: second } },
+    route: () => ({ type: "session", sessionID: session }),
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    git,
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.equal(flow.state().directory, first);
+
+  // The user switches tabs after the flow opened. The ignore write and its
+  // refresh still use the captured folder and session.
+  session = "s2";
+  const result = await flow.ignoreFile("notes.txt");
+  assert.equal(result.ok, true);
+  assert.deepEqual(gitCalls.ignore, [{ cwd: first, file: "notes.txt" }], "the captured folder is written");
+  assert.deepEqual(gitCalls.status, [first, first], "the refresh rereads the captured folder");
+
+  await cleanup();
+});
+
+test("only an untracked, unflagged file can be ignored", async () => {
+  const dir = scriptsFixture();
+  const files = [
+    gitFile("src/a.ts", { status: "modified", session: true, unattributed: false }),
+    gitFile("conflict.ts", { blocked: "conflicted" }),
+    gitFile("notes.txt"),
+  ];
+  const { git, calls: gitCalls } = ignoreService({ root: dir, files });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    git,
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  // A flow that was never opened has nothing to ignore.
+  assert.equal(await flow.ignoreFile("notes.txt"), null);
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+
+  // A tracked file is already known to git, a blocked file is shown but never
+  // acted on, and an absent path is not a row: none of them write anything.
+  assert.equal(await flow.ignoreFile("src/a.ts"), null);
+  assert.equal(await flow.ignoreFile("conflict.ts"), null);
+  assert.equal(await flow.ignoreFile("missing.txt"), null);
+  assert.deepEqual(gitCalls.ignore, [], "no write for a tracked, blocked or absent file");
+  assert.equal(flow.state().error, null, "a refused row is silent, not an error");
+  assert.deepEqual(flow.state().files.map((file) => file.path), files.map((file) => file.path));
+
+  await cleanup();
+});
+
+test("a service without the ignore step reports it instead of crashing", async () => {
+  const dir = scriptsFixture();
+  const git = {
+    async status() {
+      return {
+        ok: true,
+        root: dir,
+        branch: "main",
+        detached: false,
+        head: "h1",
+        upstream: null,
+        ahead: null,
+        files: [gitFile("notes.txt")],
+        candidates: [],
+        unattributed: [],
+        statusHash: "hash",
+      };
+    },
+    async preview() {
+      return { ok: true, token: "t1", files: [], diff: "", diffTruncated: false, diffUnavailable: false, stat: "" };
+    },
+  };
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    git,
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  const result = await flow.ignoreFile("notes.txt");
+  assert.equal(result.ok, false);
+  assert.equal(flow.state().error.code, "ignore-unavailable");
+  assert.equal(calls.toasts.at(-1).variant, "error");
+  assert.match(calls.toasts.at(-1).message, /missing the ignore step/);
+  assert.deepEqual(flow.state().files.map((file) => file.path), ["notes.txt"], "the list is kept");
+
+  await cleanup();
+});
+
+test("a refused ignore keeps the list, the selection and the target", async () => {
+  const dir = scriptsFixture();
+  const { git, calls: gitCalls } = ignoreService({
+    root: dir,
+    files: [
+      gitFile("src/a.ts", { status: "modified", session: true, unattributed: false }),
+      gitFile("notes.txt"),
+    ],
+    onAgitignore: () => ({ ok: false, error: { code: "ignore-failed", message: "permission denied" } }),
+  });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    git,
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  // The user makes the selection their own.
+  flow.toggle("notes.txt");
+  assert.deepEqual(flow.state().selection, ["src/a.ts", "notes.txt"]);
+
+  const result = await flow.ignoreFile("notes.txt");
+  assert.equal(result.ok, false);
+  assert.equal(flow.state().step, "files", "the flow stays on the file list");
+  assert.equal(flow.state().busy, "", "the busy flag is cleared");
+  assert.equal(flow.state().error.message, "permission denied", "the error stays visible");
+  assert.deepEqual(
+    flow.state().files.map((file) => file.path),
+    ["src/a.ts", "notes.txt"],
+    "the target is still listed",
+  );
+  assert.deepEqual(flow.state().selection, ["src/a.ts", "notes.txt"], "the manual choices survive");
+  assert.equal(gitCalls.status.length, 1, "a failure does not refresh");
+  assert.equal(calls.toasts.at(-1).variant, "error");
+
+  await cleanup();
+});
+
+test("a rejected ignore service call is reported and clears the busy row", async () => {
+  const dir = scriptsFixture();
+  const { git, calls: gitCalls } = ignoreService({
+    root: dir,
+    files: [
+      gitFile("src/a.ts", { status: "modified", session: true, unattributed: false }),
+      gitFile("notes.txt"),
+    ],
+    onAgitignore: () => {
+      throw new Error("gitignore write denied");
+    },
+  });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    git,
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+
+  const result = await flow.ignoreFile("notes.txt");
+  assert.equal(result.ok, false, "the rejection is reported as a failure");
+  assert.equal(result.error.code, "ignore-failed");
+  assert.match(result.error.message, /gitignore write denied/);
+  assert.equal(flow.state().step, "files", "the flow stays on the file list");
+  assert.equal(flow.state().busy, "", "the busy flag is cleared after a rejection");
+  assert.match(flow.state().error.message, /gitignore write denied/);
+  assert.equal(gitCalls.status.length, 1, "a rejection does not refresh the list");
+  assert.equal(calls.toasts.at(-1).variant, "error");
+  assert.match(calls.toasts.at(-1).message, /^Ignore: /);
+
+  await cleanup();
+});
+
+test("a successful ignore refreshes the list, drops the target and keeps manual choices", async () => {
+  const dir = scriptsFixture();
+  const first = [
+    gitFile("src/a.ts", { status: "modified", session: true, unattributed: false }),
+    gitFile("notes.txt"),
+    gitFile("junk.log"),
+  ];
+  const second = [
+    gitFile("src/a.ts", { status: "modified", session: true, unattributed: false }),
+    gitFile("notes.txt"),
+    gitFile(".gitignore"),
+  ];
+  const { git, calls: gitCalls } = ignoreService({
+    root: dir,
+    statusFiles: (count) => (count === 1 ? first : second),
+  });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    git,
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  // Only the confirmed session change starts checked; the user adds two.
+  assert.deepEqual(flow.state().selection, ["src/a.ts"]);
+  flow.toggle("notes.txt");
+  flow.toggle("junk.log");
+  assert.deepEqual(flow.state().selection, ["src/a.ts", "notes.txt", "junk.log"]);
+
+  const result = await flow.ignoreFile("junk.log");
+  assert.equal(result.ok, true);
+  assert.equal(calls.toasts.at(-1).variant, "info");
+  assert.equal(calls.toasts.at(-1).message, "Added junk.log to .gitignore");
+  assert.deepEqual(
+    flow.state().files.map((file) => file.path),
+    ["src/a.ts", "notes.txt", ".gitignore"],
+    "the refresh shows the new list",
+  );
+  // The ignored path is gone; the new .gitignore entry is never auto-checked,
+  // and the user's other choices are kept.
+  assert.deepEqual(flow.state().selection, ["src/a.ts", "notes.txt"]);
+  assert.equal(flow.state().step, "files");
+  assert.equal(gitCalls.preview, 0, "ignore stages and commits nothing");
+
+  await cleanup();
+});
+
+test("the ignore refresh preserves the attribution notice", async () => {
+  const dir = scriptsFixture();
+  const { git } = ignoreService({ root: dir, files: [gitFile("notes.txt")] });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+  });
+  // The first attribution read fails (a warning is shown); the refresh is clean
+  // and must not silently drop what the user was already told.
+  let diffFails = true;
+  const realDiff = context.client.session.diff;
+  context.client.session.diff = async (options) => {
+    if (diffFails) throw new Error("session diff failed");
+    return realDiff(options);
+  };
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    git,
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  const warning = flow.state().notice;
+  assert.match(warning, /could not be read/, "the first read warns");
+
+  diffFails = false;
+  await flow.ignoreFile("notes.txt");
+  assert.equal(flow.state().notice, warning, "the warning survives the refresh");
+
+  await cleanup();
+});
+
+test("a late ignore answer never touches a flow that was already closed", async () => {
+  const dir = scriptsFixture();
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const { git } = ignoreService({
+    root: dir,
+    files: [gitFile("notes.txt")],
+    onAgitignore: async () => {
+      await gate;
+      return { ok: true, file: "notes.txt", root: dir };
+    },
+  });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    git,
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+
+  const pending = flow.ignoreFile("notes.txt");
+  assert.equal(flow.state().busy, "ignoring the file", "the row is busy while the write runs");
+  assert.equal(flow.toggle("notes.txt"), false, "a busy flow refuses a toggle");
+
+  // The user closes the dialog before the service answers.
+  flow.cancel();
+  assert.equal(flow.state(), null);
+  release();
+  assert.equal(await pending, null, "the late answer is dropped");
+  assert.equal(flow.state(), null, "the closed flow is not recreated");
 
   await cleanup();
 });
