@@ -199,7 +199,32 @@ export function createRuntime({
         cwd: custom.project,
       });
     }
-    return items;
+    return applyButtonOrder(items, buttonConfig.orderFor(configDir(project)));
+  }
+
+  // The project's saved order is a list of stable action ids. The sidebar, the
+  // settings list, the editor and the palette all read this one catalog, so
+  // applying the order here keeps them consistent by construction. An id the
+  // project no longer has is skipped, and a button the order does not name yet
+  // (a script added since, a hand-added button) keeps its discovery position
+  // after every named one, so adding a button never reshuffles the rest.
+  function applyButtonOrder(items, order) {
+    if (!Array.isArray(order) || order.length === 0) return items;
+    const byId = new Map(items.map((item) => [item.id, item]));
+    const placed = new Set();
+    const ordered = [];
+    for (const id of order) {
+      const item = byId.get(id);
+      if (!item || placed.has(id)) continue;
+      placed.add(id);
+      ordered.push(item);
+    }
+    for (const item of items) {
+      if (placed.has(item.id)) continue;
+      placed.add(item.id);
+      ordered.push(item);
+    }
+    return ordered;
   }
 
   // What a button will actually run. An overridden command replaces the
@@ -500,36 +525,181 @@ export function createRuntime({
     }
   }
 
-  // Session-changed files are candidates, never a pre-made choice. Two sources
-  // exist in the installed typings and both answer with `{ file }` entries: the
-  // live host snapshot, `state.session.diff(sessionID)` (synchronous), and the
-  // SDK client, `client.session.diff({ path: { id } })`, whose response is a bare
-  // `FileDiff[]`. Anything else - no source, a throwing source, an unrecognised
-  // shape - yields nothing, and every file is then shown as unattributed and
-  // picked by hand. A wrong shape never fabricates a candidate.
+  // Session-changed files are the attribution fingerprint: a confirmed change
+  // starts checked, and anything the source cannot confirm is shown as
+  // unattributed and left unchecked.
+  //
+  // The installed TUI host is `@opencode/client` 2.0.32 `OpenCodeClient`
+  // (verified against the published package:
+  // `dist/promise/client.d.ts` and `dist/promise/generated/types.d.ts`), not
+  // `@opencode-ai/sdk`. Its actual contract:
+  //   - `client.message.list({ sessionID, limit?, order?, cursor?, type? })`
+  //     resolves `{ data: SessionMessageInfo[], cursor: { previous?, next? } }`.
+  //     A user message is `{ type: "user", id, time, text }`; it carries no diff.
+  //   - `client.session.diff({ sessionID, from?, to?, context? })` resolves
+  //     `FileDiffInfo[]`. Per the API docs, `from` is "user message whose turn
+  //     to diff" and `to` defaults to "the turn of `from` alone". The no-argument
+  //     call therefore answers only the newest user turn, which loses earlier
+  //     edits - the screenshot's "everything unattributed" bug.
+  //
+  // Attribution therefore walks the user turns oldest-first with the opaque
+  // `cursor.next` (docs: `order` applies to the first page and "do not combine
+  // with order" once a cursor is followed; pass the same `type`), then asks
+  // `session.diff({ from: id })` per turn and unions the confirmed files. A
+  // per-turn diff is preferred over one oldest-to-newest range because the range
+  // compares its first and last snapshot, which can hide a change reverted
+  // inside the range. Each source only adds confirmed paths; a missing route,
+  // an error, or a truncated walk keeps the confirmed subset and adds a truthful
+  // warning. Nothing is ever inferred from the git working tree.
+  //
+  // A legacy synchronous `state.session.diff(sessionID)` snapshot still wins
+  // when it reports files; an empty snapshot is not evidence and does not hide
+  // the live client.
+  const MESSAGE_PAGE_LIMIT = 100;
+  const MESSAGE_PAGE_CAP = 20;
+  const TURN_DIFF_CAP = 50;
+  const UNRESOLVED_WARNING =
+    "Some session changes could not be read, so unattributed files must be selected by hand.";
+  const INCOMPLETE_WARNING =
+    "The session history is longer than one read, so older session changes may still be unattributed.";
+
+  function diffEntries(result) {
+    return Array.isArray(result) ? result : null;
+  }
+
+  function addEntryPaths(target, entries) {
+    for (const entry of entries) {
+      const file = entry?.file;
+      if (typeof file === "string" && file.length > 0) target.add(file);
+    }
+  }
+
+  // Enumerate every user-turn id, oldest first, in bounded pages. The cursor is
+  // opaque: it is passed back verbatim and stops the walk when it does not
+  // advance, so a broken or hostile cursor cannot loop the click.
+  async function readUserTurns(sessionID) {
+    const message = context.client?.message;
+    if (typeof message?.list !== "function") return null;
+    const ids = [];
+    const seen = new Set();
+    let cursor;
+    for (let page = 0; page < MESSAGE_PAGE_CAP; page += 1) {
+      let result;
+      try {
+        result = await message.list({
+          sessionID,
+          limit: MESSAGE_PAGE_LIMIT,
+          type: "user",
+          ...(cursor ? { cursor } : { order: "asc" }),
+        });
+      } catch {
+        return { ids, failed: true, incomplete: true };
+      }
+      if (!Array.isArray(result?.data)) return { ids, failed: true, incomplete: true };
+      let added = 0;
+      for (const entry of result.data) {
+        // The server filters by `type`, but do not trust a mixed page to add a
+        // non-user id as a diff anchor.
+        if (entry?.type !== "user") continue;
+        const id = entry?.id;
+        if (typeof id !== "string" || !id || seen.has(id)) continue;
+        seen.add(id);
+        ids.push(id);
+        added += 1;
+      }
+      const next = result?.cursor?.next;
+      if (typeof next !== "string" || !next) return { ids, failed: false, incomplete: false };
+      if (added === 0) return { ids, failed: false, incomplete: true };
+      cursor = next;
+      if (page === MESSAGE_PAGE_CAP - 1) return { ids, failed: false, incomplete: true };
+    }
+    return { ids, failed: false, incomplete: true };
+  }
+
+  // Diff each user turn by its id. The list is walk-ordered oldest first, so
+  // the newest TURN_DIFF_CAP turns are the ones kept when a session is huge;
+  // the dropped older turns are reported, not silently ignored.
+  async function readTurnDiffs(sessionID, ids) {
+    const session = context.client?.session;
+    if (typeof session?.diff !== "function") {
+      return { files: new Set(), resolved: false, failed: 0, unreadable: true, truncated: false };
+    }
+    const wanted = ids.slice(-TURN_DIFF_CAP);
+    const files = new Set();
+    let resolved = false;
+    let failed = 0;
+    for (const id of wanted) {
+      let entries;
+      try {
+        entries = diffEntries(await session.diff({ sessionID, from: id }));
+      } catch {
+        entries = null;
+      }
+      if (entries === null) {
+        failed += 1;
+        continue;
+      }
+      resolved = true;
+      addEntryPaths(files, entries);
+    }
+    return { files, resolved, failed, unreadable: false, truncated: ids.length > wanted.length };
+  }
+
+  // The no-argument diff answers the newest user turn only. It is a fallback
+  // when the turn list cannot be read, never the session-wide source.
+  async function readFlatDiff(sessionID) {
+    const session = context.client?.session;
+    if (typeof session?.diff !== "function") return null;
+    try {
+      return diffEntries(await session.diff({ sessionID }));
+    } catch {
+      return null;
+    }
+  }
+
   async function sessionChangedFiles(sessionID) {
-    if (typeof sessionID !== "string" || !sessionID) return [];
-    let list = null;
+    if (typeof sessionID !== "string" || !sessionID) return { files: [], warning: "" };
+
     try {
       const snapshot = context.state?.session?.diff?.(sessionID);
-      if (Array.isArray(snapshot)) list = snapshot;
-    } catch {
-      list = null;
-    }
-    if (list === null) {
-      try {
-        const result = await context.client?.session?.diff?.({ path: { id: sessionID } });
-        if (Array.isArray(result)) list = result;
-        else if (Array.isArray(result?.data)) list = result.data;
-        else if (Array.isArray(result?.files)) list = result.files;
-        else list = [];
-      } catch {
-        return [];
+      if (Array.isArray(snapshot) && snapshot.length > 0) {
+        const files = new Set();
+        addEntryPaths(files, snapshot);
+        return { files: [...files], warning: "" };
       }
+    } catch {
+      // fall through to the client sources
     }
-    return list
-      .map((entry) => entry?.file)
-      .filter((file) => typeof file === "string" && file.length > 0);
+
+    const files = new Set();
+    const turns = await readUserTurns(sessionID);
+    let resolution = "partial";
+
+    if (turns && !turns.failed && turns.ids.length > 0) {
+      const perTurn = await readTurnDiffs(sessionID, turns.ids);
+      for (const file of perTurn.files) files.add(file);
+      if (perTurn.resolved) {
+        // An incomplete walk still returns its confirmed turns; say so.
+        if (turns.incomplete) return { files: [...files], warning: INCOMPLETE_WARNING };
+        if (perTurn.failed > 0 || perTurn.truncated) {
+          return { files: [...files], warning: UNRESOLVED_WARNING };
+        }
+        return { files: [...files], warning: "" };
+      }
+      resolution = "failed";
+    }
+
+    const flat = await readFlatDiff(sessionID);
+    if (flat !== null) {
+      addEntryPaths(files, flat);
+      if (turns === null || turns.failed || resolution === "failed") {
+        return { files: [...files], warning: UNRESOLVED_WARNING };
+      }
+      if (turns.incomplete) return { files: [...files], warning: INCOMPLETE_WARNING };
+      return { files: [...files], warning: "" };
+    }
+
+    return { files: [...files], warning: UNRESOLVED_WARNING };
   }
 
   function beginFlow(kind, { actions, sessionID, directory }) {
@@ -574,8 +744,8 @@ export function createRuntime({
     current.error = null;
     current.notice = "";
     flowChanged();
-    const sessionFiles = await sessionChangedFiles(current.sessionID);
-    const result = await current.actions.status({ cwd: current.directory, sessionFiles });
+    const attribution = await sessionChangedFiles(current.sessionID);
+    const result = await current.actions.status({ cwd: current.directory, sessionFiles: attribution.files });
     if (flow !== current) return null;
     if (!result?.ok) {
       notify(context, `Commit: ${result?.error?.message ?? "git status failed"}`, "error");
@@ -588,8 +758,13 @@ export function createRuntime({
     current.upstream = result.upstream;
     current.ahead = result.ahead;
     current.files = result.files;
-    // Nothing is pre-checked: every file is a manual choice.
-    current.selection = new Set();
+    // The attribution read is advisory: a partial read still shows its confirmed
+    // paths. Say so instead of letting the user assume everything was seen.
+    if (attribution.warning) current.notice = attribution.warning;
+    // Only confirmed session changes start checked; unsafe files never do.
+    current.selection = new Set(
+      current.files.filter((file) => file.session === true && !file.blocked).map((file) => file.path),
+    );
     current.step = "files";
     flowChanged();
     return result;
@@ -1191,6 +1366,40 @@ export function createRuntime({
     return { ok: true, id, reset: Boolean(result.removed) };
   }
 
+  // Move one runner one place up or down in this project's full button order,
+  // hidden buttons included. The order is keyed by immutable id, so a move
+  // survives a later rename and never touches a run's identity. A built-in
+  // control is not part of this list and is refused; a move at either end is a
+  // no-op - nothing to write and nothing to report - not an error.
+  function moveButton(id, direction, projectCapture) {
+    const dir = buttonProject();
+    const stale = staleCapture(projectCapture, dir);
+    if (stale) return stale;
+    if (direction !== "up" && direction !== "down") {
+      return failEdit("invalid-direction", "Direction must be up or down.");
+    }
+    if (typeof id !== "string" || !id) {
+      return failEdit("invalid-id", "A button id is required.");
+    }
+    if (controlLocked(id)) {
+      return failEdit("control-locked", "This button is built in and cannot be reordered.");
+    }
+    const project = detector.detect(currentDirectory());
+    const list = effectiveDescriptors(project).map((descriptor) => descriptor.id);
+    const index = list.indexOf(id);
+    if (index < 0) return failEdit("unknown-action", "That button is not part of this project.");
+    const target = direction === "up" ? index - 1 : index + 1;
+    if (target < 0 || target >= list.length) {
+      return { ok: true, id, moved: false };
+    }
+    const next = list.slice();
+    [next[index], next[target]] = [next[target], next[index]];
+    const result = buttonConfig.saveOrder(dir, next);
+    if (!result.ok) return failEdit(result.code, result.reason);
+    reportButtonConfigError();
+    return { ok: true, id, moved: true, order: result.order };
+  }
+
   // Deletes a hand-added button. A run it already started keeps its identity -
   // the key comes from the immutable id and the captured directory - so its log
   // and its stop target survive the delete.
@@ -1239,6 +1448,7 @@ export function createRuntime({
     saveButton,
     resetButton,
     deleteButton,
+    moveButton,
     buttonConfigError,
     disposeButtons: () => buttonConfig.dispose(),
     startAction,

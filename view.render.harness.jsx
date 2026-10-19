@@ -50,6 +50,9 @@ function createFakeRuntime(initial) {
   };
   const PROJECT_CHANGED = { ok: false, code: "project-changed", reason: "Project changed. Reopen the button editor." };
   const mismatched = (project) => typeof project === "string" && project !== "" && project !== state.project;
+  // The built-in controls are fixed: they are not part of the project's saved
+  // order, so a move for one is refused and a runner is never swapped past them.
+  const CONTROL_IDS = new Set(["commit", "push", "stop-all", "log"]);
   return {
     state,
     calls,
@@ -150,6 +153,57 @@ function createFakeRuntime(initial) {
       state.configError = null;
       this.notify();
       return { ok: true };
+    },
+    // One place up or down in this project's runner order, hidden runners
+    // included. A move past either end is a silent no-op and a built-in control
+    // is refused, exactly like the runtime; a project that changed under the
+    // open dialog is refused with the same code and reason. The order reaches
+    // both the settings list and the board the sidebar reads, so the grid
+    // reflows with the list.
+    moveButton(id, direction, projectCapture) {
+      calls.push(["moveButton", id, direction, projectCapture]);
+      if (mismatched(projectCapture)) {
+        this.notify();
+        return { ...PROJECT_CHANGED };
+      }
+      if (direction !== "up" && direction !== "down") {
+        this.notify();
+        return { ok: false, code: "invalid-direction", reason: "Direction must be up or down." };
+      }
+      if (CONTROL_IDS.has(id)) {
+        this.notify();
+        return {
+          ok: false,
+          code: "control-locked",
+          reason: "This button is built in and cannot be reordered.",
+        };
+      }
+      const runners = state.settings.filter((each) => !CONTROL_IDS.has(each.id));
+      const index = runners.findIndex((each) => each.id === id);
+      if (index < 0) {
+        this.notify();
+        return { ok: false, code: "unknown-action", reason: "That button is not part of this project." };
+      }
+      const target = direction === "up" ? index - 1 : index + 1;
+      if (target < 0 || target >= runners.length) {
+        this.notify();
+        return { ok: true, id, moved: false };
+      }
+      const next = runners.slice();
+      [next[index], next[target]] = [next[target], next[index]];
+      // The built-in controls stay after the runners, exactly like the runtime.
+      const fixed = state.settings.filter((each) => CONTROL_IDS.has(each.id));
+      state.settings = [...next, ...fixed];
+      // The sidebar reads its order from the board, so it reflows with the list.
+      const boardIndex = state.board.items.findIndex((each) => each.action?.id === id);
+      const boardTarget = direction === "up" ? boardIndex - 1 : boardIndex + 1;
+      if (boardIndex >= 0 && boardTarget >= 0 && boardTarget < state.board.items.length) {
+        const items = state.board.items.slice();
+        [items[boardIndex], items[boardTarget]] = [items[boardTarget], items[boardIndex]];
+        state.board = { ...state.board, items };
+      }
+      this.notify();
+      return { ok: true, id, moved: true, order: next.map((each) => each.id) };
     },
     subscribeSettings(listener) {
       listeners.add(listener);
@@ -615,7 +669,9 @@ scenario("settings-dialog-click-70", {
   async after(setup, runtime, capture) {
     const lines = setup.captureCharFrame().split("\n");
     const row = lines.findIndex((line) => line.includes("Live web"));
-    if (row >= 0) await setup.mockMouse.click(2, row);
+    // The move arrows lead the row now, so aim at the toggle itself.
+    const column = row >= 0 ? lines[row].indexOf("Live web") : -1;
+    if (row >= 0 && column >= 0) await setup.mockMouse.click(column + 2, row);
     await setup.renderOnce();
     capture("after-toggle");
     const showAll = setup.captureCharFrame().split("\n").findIndex((line) => line.includes("Show all buttons"));
@@ -668,7 +724,9 @@ scenario("settings-dialog-error-after-click-70", {
     capture("before");
     const lines = setup.captureCharFrame().split("\n");
     const row = lines.findIndex((line) => line.includes("Live web"));
-    if (row >= 0) await setup.mockMouse.click(2, row);
+    // The move arrows lead the row now, so aim at the toggle itself.
+    const column = row >= 0 ? lines[row].indexOf("Live web") : -1;
+    if (row >= 0 && column >= 0) await setup.mockMouse.click(column + 2, row);
     await setup.renderOnce();
     capture("after");
   },
@@ -1021,6 +1079,107 @@ dialogScenario("settings-config-error-70", {
     settings: editableSettings,
     editors: editorItems,
     configError: { code: "read-failed", message: "Could not read the saved buttons." },
+  },
+});
+
+// Reordering. Every runner row carries an up arrow and a down arrow, left of the
+// name; the built-in controls are fixed, so their rows carry neither. One runner
+// is hidden, to show a hidden button is still listed and still movable.
+const moveSettings = [
+  { id: "build-mobile", label: "Build", visible: true },
+  { id: "web-live", label: "Live web", visible: false },
+  { id: "next-live", label: "Next live", visible: true },
+  { id: "commit", label: "Commit", visible: true },
+  { id: "stop-all", label: "Stop all", visible: false },
+];
+
+dialogScenario("settings-move-controls-70", {
+  runtime: { board: boardOf(nextOnly), settings: moveSettings },
+});
+
+// A move swaps the runner with its neighbour and tells the runtime which button
+// and which way. The toggle never fires: the click only reaches the move.
+dialogScenario("settings-move-up-70", {
+  runtime: { board: boardOf(nextOnly), settings: moveSettings },
+  async after(setup, runtime, capture) {
+    capture("before");
+    await clickOn(setup, "Next live", "↑");
+    capture("after-move");
+  },
+});
+
+dialogScenario("settings-move-down-70", {
+  runtime: { board: boardOf(nextOnly), settings: moveSettings },
+  async after(setup, runtime, capture) {
+    capture("before");
+    await clickOn(setup, "Build", "↓");
+    capture("after-move");
+  },
+});
+
+// The ends of the runner list: the first cannot go up and the last cannot go
+// down. The arrows stay drawn but disabled, so a click on either lands on
+// nothing and the order never changes.
+dialogScenario("settings-move-boundary-70", {
+  runtime: { board: boardOf(nextOnly), settings: moveSettings },
+  async after(setup, runtime, capture) {
+    capture("before");
+    await clickOn(setup, "Build", "↑");
+    await clickOn(setup, "Next live", "↓");
+    capture("after-move");
+  },
+});
+
+// A hidden runner is still in the list and still movable, and it keeps its
+// hidden marker after it moves.
+dialogScenario("settings-move-hidden-70", {
+  runtime: { board: boardOf(nextOnly), settings: moveSettings },
+  async after(setup, runtime, capture) {
+    capture("before");
+    await clickOn(setup, "Live web", "↑");
+    capture("after-move");
+  },
+});
+
+// The session can switch projects while the list is open. The move carries the
+// project the dialog captured, so the runtime refuses it and the dialog shows
+// why instead of reordering the project that is open now.
+dialogScenario("settings-move-stale-70", {
+  runtime: { board: boardOf(nextOnly), settings: moveSettings },
+  async after(setup, runtime, capture) {
+    capture("before");
+    runtime.state.project = "/home/nitro/code/other";
+    await clickOn(setup, "Next live", "↑");
+    capture("after-move");
+  },
+});
+
+// The move list and the sidebar read one order, so a move reorders the grid too.
+const pairSettings = [
+  { id: "build-mobile", label: "Build", visible: true },
+  { id: "web-live", label: "Live web", visible: true },
+  { id: "commit", label: "Commit", visible: true },
+];
+
+scenario("settings-move-sidebar-order-70", {
+  width: 70,
+  height: 26,
+  runtime: createFakeRuntime({
+    board: boardOf({ items: [item("build-mobile", "Build"), item("web-live", "Live web")] }),
+    settings: pairSettings,
+  }),
+  build(runtime) {
+    return (
+      <box flexDirection="column" width="100%" height="100%">
+        {Sidebar({ context: { theme }, runtime, sessionID: "session-1" })}
+        {SettingsDialog({ context: { theme, ui: { dialog: { clear() {} } } }, runtime })}
+      </box>
+    );
+  },
+  async after(setup, runtime, capture) {
+    capture("before");
+    await clickOn(setup, "[x] Live web", "↑");
+    capture("after-move");
   },
 });
 

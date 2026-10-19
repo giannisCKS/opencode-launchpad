@@ -454,6 +454,18 @@ function expectNoTruncation(entry, label, frame = "frame") {
   return box;
 }
 
+// The first row of a drawn frame that contains `text`, or -1. Two rows of the
+// same frame can carry the same word (a sidebar cell and a settings row), so a
+// caller that needs one of them picks a substring only that row carries.
+function rowIndexOf(frame, text) {
+  return frame.split("\n").findIndex((line) => line.includes(text));
+}
+
+// The first row of a drawn frame that contains `text`, or "".
+function frameLine(frame, text) {
+  return frame.split("\n").find((line) => line.includes(text)) ?? "";
+}
+
 // The column counts the harness renders for the sweep scenarios. Every width a
 // narrow terminal can produce between the documented stops is covered.
 const sweepWidths = [20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 34, 36, 38, 40];
@@ -954,5 +966,150 @@ describe("sidebar layout from a real render", () => {
       assert.equal(box.w - 2, label.length, `${narrow.name}: "${label}" is no longer an exact fit`);
       assert.ok(box.h >= 4, `${narrow.name}: "${label}" did not wrap`);
     }
+  });
+
+  test("a move arrow sits left of every runner and never on a built-in", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("settings-move-controls-70");
+    const frame = entry.frames.frame;
+    // A runner row carries both arrows, left of the name, so the row reads
+    // "step this button, then the button".
+    for (const label of ["[x] Build", "[ ] Live web", "[x] Next live"]) {
+      const row = frameLine(frame, label);
+      assert.ok(row.includes("↑"), `${entry.name}: "${label}" has no up arrow\n${row}`);
+      assert.ok(row.includes("↓"), `${entry.name}: "${label}" has no down arrow\n${row}`);
+      assert.ok(
+        row.indexOf("↑") < row.indexOf(label),
+        `${entry.name}: the up arrow is not left of "${label}"\n${row}`,
+      );
+      assert.ok(
+        row.indexOf("↓") < row.indexOf(label),
+        `${entry.name}: the down arrow is not left of "${label}"\n${row}`,
+      );
+    }
+    // A built-in control is fixed, so its row carries neither arrow.
+    for (const label of ["[x] Commit", "[ ] Stop all"]) {
+      const row = frameLine(frame, label);
+      assert.ok(!/[↑↓]/.test(row), `${entry.name}: "${label}" offers a move\n${row}`);
+    }
+    // The editor still closes the row on the right, after the name.
+    const editable = measurement("settings-editable-70");
+    const editRow = frameLine(editable.frames.frame, "[x] Next live");
+    assert.ok(editRow.includes("Edit"), `${editable.name}: the runner row lost its editor\n${editRow}`);
+    assert.ok(
+      editRow.indexOf("↑") < editRow.indexOf("[x] Next live"),
+      `${editable.name}: the move arrow is not left of the name\n${editRow}`,
+    );
+    assert.ok(
+      editRow.indexOf("[x] Next live") < editRow.indexOf("Edit"),
+      `${editable.name}: the editor is not on the right of the name\n${editRow}`,
+    );
+  });
+
+  test("moving a runner up swaps it with the row above", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("settings-move-up-70");
+    // The move reaches the runtime with the captured project, and nothing else:
+    // the toggle did not fire, so a move never flips a button's visibility.
+    assert.deepEqual(
+      entry.calls,
+      [["moveButton", "next-live", "up", "/workspace/demo"]],
+      `calls: ${JSON.stringify(entry.calls)}`,
+    );
+    const before = entry.frames.before;
+    const after = entry.frames["after-move"];
+    assert.ok(
+      rowIndexOf(before, "[ ] Live web") < rowIndexOf(before, "[x] Next live"),
+      `${entry.name}: the rows started in the wrong order`,
+    );
+    assert.ok(
+      rowIndexOf(after, "[x] Next live") < rowIndexOf(after, "[ ] Live web"),
+      `${entry.name}: the move did not reorder the list\n${after}`,
+    );
+  });
+
+  test("moving a runner down swaps it with the row below", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("settings-move-down-70");
+    assert.deepEqual(
+      entry.calls,
+      [["moveButton", "build-mobile", "down", "/workspace/demo"]],
+      `calls: ${JSON.stringify(entry.calls)}`,
+    );
+    const after = entry.frames["after-move"];
+    assert.ok(
+      rowIndexOf(after, "[ ] Live web") < rowIndexOf(after, "[x] Build"),
+      `${entry.name}: the move did not reorder the list\n${after}`,
+    );
+  });
+
+  test("the ends of the runner list offer no move", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("settings-move-boundary-70");
+    // The first runner cannot go up and the last cannot go down. The arrows are
+    // drawn but disabled, so a click on either reaches nothing.
+    assert.deepEqual(entry.calls, [], `a boundary control still moved: ${JSON.stringify(entry.calls)}`);
+    const after = entry.frames["after-move"];
+    assert.ok(
+      rowIndexOf(after, "[x] Build") < rowIndexOf(after, "[ ] Live web"),
+      `${entry.name}: the order changed at the boundary\n${after}`,
+    );
+    // The disabled arrows are still visible, so the ends of the list read as
+    // the ends instead of the control vanishing.
+    assert.ok(frameLine(after, "[x] Build").includes("↑"), "the first runner lost its up arrow");
+    assert.ok(frameLine(after, "[x] Next live").includes("↓"), "the last runner lost its down arrow");
+  });
+
+  test("a hidden runner is still listed and still movable", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("settings-move-hidden-70");
+    assert.deepEqual(
+      entry.calls,
+      [["moveButton", "web-live", "up", "/workspace/demo"]],
+      `calls: ${JSON.stringify(entry.calls)}`,
+    );
+    const after = entry.frames["after-move"];
+    assert.match(after, /\[ \] Live web/, "the hidden marker was lost after the move");
+    assert.match(after, /2 buttons hidden/, "the hidden count changed after the move");
+    assert.ok(
+      rowIndexOf(after, "[ ] Live web") < rowIndexOf(after, "[x] Build"),
+      `${entry.name}: the hidden runner did not move\n${after}`,
+    );
+  });
+
+  test("a project that changed under the list refuses the move", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("settings-move-stale-70");
+    // The move still carries the project the dialog captured when it opened, so
+    // the runtime can refuse it when the session has switched.
+    assert.equal(entry.calls.length, 1, `calls: ${JSON.stringify(entry.calls)}`);
+    assert.deepEqual(entry.calls[0].slice(0, 3), ["moveButton", "next-live", "up"]);
+    assert.equal(entry.calls[0][3], "/workspace/demo", "the move lost the captured project");
+    const after = entry.frames["after-move"];
+    assert.match(after, /Project changed\. Reopen the button editor\./);
+    assert.ok(
+      rowIndexOf(after, "[ ] Live web") < rowIndexOf(after, "[x] Next live"),
+      `${entry.name}: the refused move still reordered the list\n${after}`,
+    );
+  });
+
+  test("a move reorders the sidebar and the list together", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("settings-move-sidebar-order-70");
+    assert.deepEqual(
+      entry.calls,
+      [["moveButton", "web-live", "up", "/workspace/demo"]],
+      `calls: ${JSON.stringify(entry.calls)}`,
+    );
+    // The grid and the list read one order: both flip together.
+    expectCellsWellFormed(entry, "before");
+    expectCellsWellFormed(entry, "after-move");
+    expectPair(entry, "Build", "Live web", 70, "before");
+    expectPair(entry, "Live web", "Build", 70, "after-move");
+    const after = entry.frames["after-move"];
+    assert.ok(
+      rowIndexOf(after, "[x] Live web") < rowIndexOf(after, "[x] Build"),
+      `${entry.name}: the settings list did not reorder with the grid\n${after}`,
+    );
   });
 });

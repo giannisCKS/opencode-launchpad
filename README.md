@@ -105,8 +105,9 @@ Both flows open a dialog and neither one touches the repository before you appro
 
 **Commit** — the dialog lists the changed files and marks each one `session change` (it came from this
 session's diff: the live host snapshot first, then the SDK client) or `unattributed` (the diff could not
-be read, or did not answer with a known shape). Nothing is pre-selected: every file is a manual
-choice, and a file the service refused to touch (a conflict, a submodule, an ambiguous rename, an
+be read, or did not answer with a known shape). Confirmed session changes start selected; unattributed
+files remain unchecked. Review and adjust the selection before continuing. A file the service refused
+to touch (a conflict, a submodule, an ambiguous rename, an
 unsafe path) is shown with its reason and cannot be picked. `Continue` freezes exactly the selected
 files into a private index and shows the full patch. If that patch cannot be shown in full, the review
 is dropped and nothing is committed. `Generate message` asks first: the next step states that the diff
@@ -258,6 +259,12 @@ own palette dialog, not an entry in OpenCode's native Settings screen.
 
 ## Runner button editing
 
+Use **↑** and **↓** on the left of a runner in **Launchpad: settings** to change its position.
+The sidebar fills two columns from left to right, then continues on the next row. Order is saved
+per project directory. Hidden runners keep their place in the settings list; newly discovered
+commands appear after the saved order. Git and utility controls stay in their fixed rows.
+Moving a button never runs it or changes its command, visibility, logs, or stop target.
+
 Launchpad settings also supports renaming runner buttons, changing their executable and arguments,
 and adding custom buttons. Commit, Push, Stop all, and Show logs remain protected controls.
 Arguments are a JSON array of strings, for example `["test", "--workspace"]` for executable
@@ -386,7 +393,7 @@ reports an in-flight stop as such, `Show logs` reopens the active project's outp
 and explains an empty history, and a stop request for a vanished run is answered rather than ignored.
 The Git flows are covered end to end against the real service with a scripted `git` and `copilot`, so no
 repository, network call or Copilot run is involved: the click-time session and folder, the session
-diff becoming candidates (never a selection), a blocked file refusing selection, the exact patch and
+diff preselecting only confirmed safe session changes, a blocked file refusing selection, the exact patch and
 stat shown for review, the egress step being the only sender (from the review's temp folder, with
 `COPILOT_ALLOW_ALL` absent) and the API refusing to generate before that step, the editable message
 prompt, the commit running the frozen selection

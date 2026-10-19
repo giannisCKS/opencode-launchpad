@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { dialogKeyLayer } from "./runners.js";
+import { createProjectDetector, dialogKeyLayer, discoverActions } from "./runners.js";
 import { PLUGIN_ID, setupWith } from "./tui.js";
 
 const roots = [];
@@ -79,17 +79,34 @@ function createContext({
   route,
   diffFiles = {},
   diffThrows = false,
+  messageItems = null,
+  messagesMissing = false,
+  messagesThrows = false,
+  messagesMalformed = false,
+  messageDiffFiles = {},
+  messageDiffThrows = false,
   snapshotFiles = null,
   promptAnswers = [],
 }) {
-  const calls = { slots: [], dialogs: [], toasts: [], layers: [], diffs: [], snapshots: [], prompts: [] };
+  const calls = {
+    slots: [],
+    dialogs: [],
+    toasts: [],
+    layers: [],
+    diffs: [],
+    messages: [],
+    invalid: [],
+    snapshots: [],
+    prompts: [],
+  };
   const context = {
     theme: {
       text: { base: "#ffffff", muted: "#888888", error: "#ff0000" },
       background: { action: { primary: { focused: "#333333" } }, raised: { base: "#222222" } },
     },
     location: { directory: locationDirectory },
-    // The live host snapshot, when a test provides one.
+    // Legacy v1 host snapshot fallback; the current host has no `state`. It is
+    // absent unless a test provides one, which keeps the client path exercised.
     state: {
       session: {
         diff(sessionID) {
@@ -127,16 +144,79 @@ function createContext({
         },
       },
     },
-    // The session diff is the candidate list, never a selection. The request and
-    // the response follow the installed SDK: `{ path: { id } }` in, a bare
-    // `FileDiff[]` out.
+    // Session attribution follows the installed `@opencode/client` 2.0.32
+    // contract, not `@opencode-ai/sdk`:
+    //   - `client.message.list({ sessionID, limit?, order?, cursor?, type? })`
+    //     resolves `{ data: SessionMessageInfo[], cursor: { previous, next } }`;
+    //     a user entry is `{ type: "user", id, time, text }`.
+    //   - `client.session.diff({ sessionID, from?, to?, context? })` resolves a
+    //     bare `FileDiffInfo[]`.
+    // Any request on the fabricated `session.messages`/`before`/`directory`/
+    // `messageID` shape throws, so a regression fails instead of passing.
     client: {
+      message: messagesMissing
+        ? undefined
+        : {
+            async list(options) {
+              calls.messages.push(options);
+              if (
+                options?.path !== undefined ||
+                options?.before !== undefined ||
+                options?.directory !== undefined
+              ) {
+                throw new Error(
+                  "unsupported message list request: expected { sessionID, limit, order, cursor, type }",
+                );
+              }
+              if (typeof options?.sessionID !== "string" || options.type !== "user") {
+                throw new Error("message list requires sessionID and type: 'user'");
+              }
+              if (options.cursor !== undefined && options.order !== undefined) {
+                throw new Error("order must not be combined with cursor");
+              }
+              if (messagesThrows) throw new Error("message list failed");
+              if (messagesMalformed) return { data: "not-a-list" };
+              const source = messageItems?.[options.sessionID] ?? [];
+              const ordered = [...source].sort(
+                (a, b) => (a?.time?.created ?? 0) - (b?.time?.created ?? 0),
+              );
+              if (options.order === "desc") ordered.reverse();
+              const at = typeof options.cursor === "string" ? Number(options.cursor.slice(1)) : 0;
+              if (typeof options.cursor === "string" && !Number.isInteger(at)) {
+                throw new Error("bad cursor");
+              }
+              const limit = typeof options.limit === "number" ? options.limit : ordered.length;
+              const page = ordered.slice(at, at + limit);
+              const next = at + limit < ordered.length ? `c${at + limit}` : null;
+              return { data: page, cursor: { previous: null, next } };
+            },
+          },
       session: {
+        // A fabricated route: calling it is a regression.
+        async messages() {
+          calls.invalid.push("session.messages");
+          throw new Error("session.messages is not part of the @opencode/client contract");
+        },
         async diff(options) {
           calls.diffs.push(options);
+          for (const key of ["path", "directory", "messageID", "before"]) {
+            if (options?.[key] !== undefined) {
+              throw new Error(`unsupported session diff request key: ${key}`);
+            }
+          }
           if (diffThrows) throw new Error("session diff failed");
-          const files = diffFiles[options?.path?.id] ?? [];
-          return files.map((file) => ({ file, additions: 1, deletions: 0 }));
+          if (options?.from !== undefined && messageDiffThrows) throw new Error("message diff failed");
+          const files =
+            options?.from !== undefined
+              ? (messageDiffFiles[options.from] ?? [])
+              : (diffFiles[options.sessionID] ?? []);
+          return files.map((file) => ({
+            file,
+            patch: "",
+            additions: 1,
+            deletions: 0,
+            status: "modified",
+          }));
         },
       },
     },
@@ -178,6 +258,13 @@ async function until(predicate, label = "condition", timeoutMs = 2000) {
     await new Promise((resolve) => setTimeout(resolve, 2));
   }
   throw new Error(`Timed out waiting for ${label}`);
+}
+
+// A user-message entry as `client.message.list({ type: "user" })` returns it:
+// `{ type: "user", id, time, text }`. It carries no diff - the turn's files come
+// from `session.diff({ sessionID, from: id })`.
+function messageTurn(id, created) {
+  return { id, type: "user", time: { created }, text: "" };
 }
 
 // A scripted `git` (and `copilot`) so the real service runs end to end without a
@@ -1492,9 +1579,13 @@ test("the commit flow reviews the exact patch before anything is written", async
   assert.equal(calls.dialogs[0].render().kind, "git");
   await until(() => flow.state()?.step === "files", "the file list");
 
-  // The session diff was asked for with the installed SDK's request shape, and
-  // its file is a candidate, not a choice.
-  assert.deepEqual(calls.diffs, [{ path: { id: "s1" } }]);
+  // The session diff was asked for with the installed SDK's request shape. Its
+  // file is a confirmed session change, so it starts checked by default.
+  assert.deepEqual(
+    calls.diffs,
+    [{ sessionID: "s1" }],
+    "the no-turn fallback asks the newest-turn diff with the flat shape",
+  );
   assert.deepEqual(
     flow.state().files.map((file) => [file.path, file.session, file.unattributed]),
     [
@@ -1502,8 +1593,10 @@ test("the commit flow reviews the exact patch before anything is written", async
       ["notes.txt", false, true],
     ],
   );
-  assert.deepEqual(flow.state().selection, [], "every file is picked by hand");
+  assert.deepEqual(flow.state().selection, ["src/a.ts"], "only confirmed session changes start checked");
 
+  assert.equal(flow.toggle("src/a.ts"), true);
+  assert.deepEqual(flow.state().selection, [], "a preselected file can be unchecked");
   assert.equal(flow.toggle("src/a.ts"), true);
   assert.deepEqual(flow.state().selection, ["src/a.ts"]);
 
@@ -1568,6 +1661,136 @@ test("the commit flow reviews the exact patch before anything is written", async
   await cleanup();
 });
 
+test("the review default checks only confirmed session changes, never unsafe ones", async () => {
+  const dir = scriptsFixture();
+  const git = {
+    async status() {
+      return {
+        ok: true,
+        root: dir,
+        branch: "main",
+        detached: false,
+        head: "h1",
+        upstream: null,
+        ahead: null,
+        files: [
+          { path: "src/a.ts", session: true, unattributed: false, blocked: null },
+          { path: "src/conflict.ts", session: true, unattributed: false, blocked: "conflicted" },
+          { path: "notes.txt", session: false, unattributed: true, blocked: null },
+        ],
+        candidates: [],
+        unattributed: [],
+        statusHash: "hash",
+      };
+    },
+    async preview() {
+      return { ok: true, token: "t1", files: [], diff: "", diffTruncated: false, diffUnavailable: false, stat: "" };
+    },
+    discard() {
+      return { ok: true };
+    },
+  };
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    git,
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+
+  // The default is exactly the confirmed, safe session change: a blocked session
+  // change and an unattributed change are shown but never start checked.
+  assert.deepEqual(flow.state().selection, ["src/a.ts"], "only the safe session change is preselected");
+  assert.deepEqual(
+    flow.state().files.map((file) => [file.path, file.blocked]),
+    [
+      ["src/a.ts", null],
+      ["src/conflict.ts", "conflicted"],
+      ["notes.txt", null],
+    ],
+  );
+
+  // A blocked file cannot be selected even by an explicit toggle.
+  assert.equal(flow.toggle("src/conflict.ts"), false, "a blocked file refuses selection");
+  assert.deepEqual(flow.state().selection, ["src/a.ts"], "the blocked file stayed out");
+  // An unattributed file can be opted in by hand, and back out again.
+  assert.equal(flow.toggle("notes.txt"), true);
+  assert.deepEqual(flow.state().selection, ["src/a.ts", "notes.txt"]);
+  assert.equal(flow.toggle("notes.txt"), true);
+  assert.deepEqual(flow.state().selection, ["src/a.ts"]);
+
+  await cleanup();
+});
+
+test("a reload returns the selection to the deliberate default, not the user's edits", async () => {
+  const dir = scriptsFixture();
+  const git = {
+    async status() {
+      return {
+        ok: true,
+        root: dir,
+        branch: "main",
+        detached: false,
+        head: "h1",
+        upstream: null,
+        ahead: null,
+        files: [
+          { path: "src/a.ts", session: true, unattributed: false, blocked: null },
+          { path: "notes.txt", session: false, unattributed: true, blocked: null },
+        ],
+        candidates: [],
+        unattributed: [],
+        statusHash: "hash",
+      };
+    },
+    async preview() {
+      return { ok: true, token: "t1", files: [], diff: "", diffTruncated: false, diffUnavailable: false, stat: "" };
+    },
+    discard() {
+      return { ok: true };
+    },
+  };
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    git,
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.deepEqual(flow.state().selection, ["src/a.ts"]);
+
+  // The user makes the selection their own...
+  flow.toggle("src/a.ts");
+  flow.toggle("notes.txt");
+  assert.deepEqual(flow.state().selection, ["notes.txt"]);
+
+  // ...and a reload deliberately rebuilds it from the status default, so the
+  // action's own refresh cannot silently widen what a commit would include.
+  await flow.reload();
+  assert.equal(flow.state().step, "files");
+  assert.deepEqual(flow.state().selection, ["src/a.ts"], "the reload restores the default, not the edits");
+
+  await cleanup();
+});
+
 test("a patch that cannot be shown in full is dropped, never committed blind", async () => {
   const dir = scriptsFixture();
   const discarded = [];
@@ -1626,9 +1849,12 @@ test("a patch that cannot be shown in full is dropped, never committed blind", a
 
   runtime.openGit("commit");
   await until(() => flow.state()?.step === "files", "the file list");
-  flow.toggle("src/a.ts");
+  assert.deepEqual(
+    flow.state().selection,
+    ["src/a.ts"],
+    "the confirmed session change starts checked; review needs no toggle first",
+  );
   await flow.previewSelection();
-
   assert.equal(flow.state().step, "blocked");
   assert.match(flow.state().notice, /larger than the review limit/);
   assert.deepEqual(discarded, ["t1"], "the unusable review is dropped");
@@ -1655,6 +1881,7 @@ test("a commit that already exists is shown with its hash and never retried", as
     sessions: { s1: { directory: dir } },
     route: () => ({ type: "session", sessionID: "s1" }),
     promptAnswers: ["fix(web): one line"],
+    diffFiles: { s1: ["src/a.ts"] },
   });
   const cleanup = await startPlugin(context, view, {
     spawn: createFakeSpawn(),
@@ -1667,7 +1894,7 @@ test("a commit that already exists is shown with its hash and never retried", as
 
   runtime.openGit("commit");
   await until(() => flow.state()?.step === "files", "the file list");
-  flow.toggle("src/a.ts");
+  assert.deepEqual(flow.state().selection, ["src/a.ts"], "the confirmed session change starts checked");
   await flow.previewSelection();
   flow.askEgress();
   await flow.approveEgress();
@@ -1810,7 +2037,7 @@ test("cancelling a review drops it and leaves the repository alone", async () =>
 
   runtime.openGit("commit");
   await until(() => flow.state()?.step === "files", "the file list");
-  flow.toggle("src/a.ts");
+  assert.deepEqual(flow.state().selection, ["src/a.ts"], "the confirmed session change starts checked");
   await flow.previewSelection();
   assert.equal(flow.state().step, "preview");
   assert.equal(readdirSync(tmpRoot).length, 1, "the review holds one private index");
@@ -1959,6 +2186,431 @@ test("an unreadable session diff leaves every file unattributed", async () => {
   await cleanup();
 });
 
+test("session attribution uses the installed client's message.list and session.diff contract", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0";
+  const exec = fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: { s1: [messageTurn("u1", 100)] },
+    messageDiffFiles: { u1: ["src/a.ts"] },
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  // `client.message.list` is filtered to user turns, oldest first.
+  assert.deepEqual(calls.messages, [
+    { sessionID: "s1", limit: 100, type: "user", order: "asc" },
+  ]);
+  // Each user turn is diffed by `from`; the fabricated keys never appear.
+  assert.deepEqual(calls.diffs, [{ sessionID: "s1", from: "u1" }]);
+  for (const request of [...calls.messages, ...calls.diffs]) {
+    for (const key of ["path", "before", "directory", "messageID"]) {
+      assert.equal(key in request, false, `${key} is not part of the client contract`);
+    }
+  }
+  assert.deepEqual(calls.invalid, [], "the fabricated session.messages route is never called");
+  assert.deepEqual(flow.state().selection, ["src/a.ts"]);
+
+  // The mock rejects the fabricated shapes outright, so a regression fails.
+  await assert.rejects(
+    () => context.client.session.messages(),
+    /not part of the @opencode\/client contract/,
+  );
+  await assert.rejects(
+    () => context.client.session.diff({ sessionID: "s1", messageID: "u1" }),
+    /unsupported session diff request key: messageID/,
+  );
+  await assert.rejects(
+    () => context.client.message.list({ sessionID: "s1", type: "user", before: "u1" }),
+    /unsupported message list request/,
+  );
+  await assert.rejects(
+    () =>
+      context.client.message.list({ sessionID: "s1", type: "user", order: "asc", cursor: "c1" }),
+    /order must not be combined with cursor/,
+  );
+
+  await cleanup();
+});
+
+test("an earlier session turn keeps its files attributed when the latest turn changed nothing", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0? notes.txt\0";
+  const exec = fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: { s1: [messageTurn("u2", 200), messageTurn("u1", 100)] },
+    messageDiffFiles: { u1: ["src/a.ts"], u2: [] },
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  // The latest turn made no edit; the older turn's file is still a confirmed
+  // session change and starts checked.
+  assert.deepEqual(flow.state().selection, ["src/a.ts"], "the earlier turn's file starts checked");
+  assert.deepEqual(
+    flow.state().files.map((file) => [file.path, file.session, file.unattributed]),
+    [
+      ["src/a.ts", true, false],
+      ["notes.txt", false, true],
+    ],
+  );
+  assert.deepEqual(
+    calls.diffs,
+    [
+      { sessionID: "s1", from: "u1" },
+      { sessionID: "s1", from: "u2" },
+    ],
+    "both user turns were diffed, not just the newest",
+  );
+  assert.deepEqual(calls.messages, [
+    { sessionID: "s1", limit: 100, type: "user", order: "asc" },
+  ]);
+  assert.equal(flow.state().notice, "", "a complete read needs no warning");
+
+  await cleanup();
+});
+
+test("a multi-page user history is walked with the opaque cursor", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0";
+  const exec = fakeGit({ root: dir, status });
+  const items = [];
+  for (let i = 0; i < 150; i += 1) items.push(messageTurn(`u${i}`, i));
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: { s1: items },
+    messageDiffFiles: { u120: ["src/a.ts"] },
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.deepEqual(
+    calls.messages,
+    [
+      { sessionID: "s1", limit: 100, type: "user", order: "asc" },
+      // The cursor is opaque and `order` is not combined with it.
+      { sessionID: "s1", limit: 100, type: "user", cursor: "c100" },
+    ],
+    "the walk follows cursor.next to the older page",
+  );
+  assert.deepEqual(flow.state().selection, ["src/a.ts"], "a turn from the first page still attributes");
+  // More turns than the per-click cap are diffed, and the omission is stated.
+  assert.match(flow.state().notice, /could not be read/, "unwalked turns are disclosed");
+
+  await cleanup();
+});
+
+test("duplicate files across session turns are attributed once", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0? b.ts\0";
+  const exec = fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: { s1: [messageTurn("u2", 200), messageTurn("u1", 100)] },
+    messageDiffFiles: { u2: ["src/a.ts", "b.ts"], u1: ["src/a.ts"] },
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.deepEqual([...flow.state().selection].sort(), ["b.ts", "src/a.ts"]);
+  assert.equal(flow.state().files.length, 2, "each path appears once");
+
+  await cleanup();
+});
+
+test("each user turn is diffed by its own id", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0";
+  const exec = fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: { s1: [messageTurn("u2", 200), messageTurn("u1", 100)] },
+    messageDiffFiles: { u1: ["src/a.ts"], u2: [] },
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.deepEqual(flow.state().selection, ["src/a.ts"]);
+  assert.deepEqual(
+    calls.diffs,
+    [
+      { sessionID: "s1", from: "u1" },
+      { sessionID: "s1", from: "u2" },
+    ],
+    "the turn id is the `from` anchor, not a messageID",
+  );
+  assert.equal(flow.state().notice, "", "every turn diff resolved");
+
+  await cleanup();
+});
+
+test("a failed message list read falls back to the flat diff and warns", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0";
+  const exec = fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    diffFiles: { s1: ["src/a.ts"] },
+    messagesThrows: true,
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.deepEqual(flow.state().selection, ["src/a.ts"], "the flat diff still attributes the newest turn");
+  assert.deepEqual(calls.diffs, [{ sessionID: "s1" }]);
+  assert.match(flow.state().notice, /could not be read/, "the partial read is stated, not hidden");
+
+  await cleanup();
+});
+
+test("a malformed message list response falls back to the flat diff and warns", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0";
+  const exec = fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    diffFiles: { s1: ["src/a.ts"] },
+    messagesMalformed: true,
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.deepEqual(flow.state().selection, ["src/a.ts"]);
+  assert.equal(calls.messages.length, 1, "the message list is tried once, not retried");
+  assert.match(flow.state().notice, /could not be read/);
+
+  await cleanup();
+});
+
+test("a failed per-turn diff keeps the confirmed flat subset and warns", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0";
+  const exec = fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: { s1: [messageTurn("u1", 100)] },
+    diffFiles: { s1: ["src/a.ts"] },
+    messageDiffThrows: true,
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.deepEqual(flow.state().selection, ["src/a.ts"]);
+  assert.deepEqual(
+    calls.diffs,
+    [{ sessionID: "s1", from: "u1" }, { sessionID: "s1" }],
+    "the turn diff failed, so the newest-turn diff was the fallback",
+  );
+  assert.match(flow.state().notice, /could not be read/);
+
+  await cleanup();
+});
+
+test("a host without message.list falls back to the newest-turn diff and warns", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0";
+  const exec = fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    diffFiles: { s1: ["src/a.ts"] },
+    messagesMissing: true,
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.deepEqual(flow.state().selection, ["src/a.ts"]);
+  assert.equal(calls.messages.length, 0, "an absent route is not called");
+  assert.deepEqual(calls.diffs, [{ sessionID: "s1" }]);
+  assert.match(flow.state().notice, /could not be read/, "one turn cannot stand for the history");
+
+  await cleanup();
+});
+
+test("a history beyond the page cap warns instead of silently dropping turns", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0";
+  const exec = fakeGit({ root: dir, status });
+  const items = [];
+  for (let i = 0; i < 2100; i += 1) items.push(messageTurn(`u${i}`, i));
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: { s1: items },
+    messageDiffFiles: { u1999: ["src/a.ts"] },
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.equal(calls.messages.length, 20, "the walk stops at the bounded page cap");
+  assert.match(flow.state().notice, /longer than one read/, "the truncation is stated, not hidden");
+
+  await cleanup();
+});
+
+test("a confirmed session change that git blocks is never preselected", async () => {
+  const dir = scriptsFixture();
+  symlinkSync("/etc/hostname", path.join(dir, "escape"));
+  const status = "? escape\0";
+  const exec = fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: { s1: [messageTurn("u1", 100)] },
+    messageDiffFiles: { u1: ["escape"] },
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  assert.deepEqual(
+    flow.state().files.map((file) => [file.path, file.session, file.unattributed, file.blocked]),
+    [["escape", true, false, "symlink-escape"]],
+    "attribution is recorded, but the blocked file stays out of the selection",
+  );
+  assert.deepEqual(flow.state().selection, []);
+
+  await cleanup();
+});
+
+test("reading session attribution performs no git mutation", async () => {
+  const dir = scriptsFixture();
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0";
+  const exec = fakeGit({ root: dir, status });
+  const { context, calls } = createContext({
+    locationDirectory: dir,
+    sessions: { s1: { directory: dir } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+    messageItems: { s1: [messageTurn("u1", 100)] },
+    messageDiffFiles: { u1: ["src/a.ts"] },
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    gitOptions: { exec, tmpRoot: path.join(dir, "git-tmp") },
+    detectTtlMs: 0,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const flow = runtime.commitFlow;
+
+  runtime.openGit("commit");
+  await until(() => flow.state()?.step === "files", "the file list");
+  const mutating = exec.calls.filter(
+    (call) => call.file === "git" && ["add", "commit", "push"].includes(call.args[0]),
+  );
+  assert.deepEqual(mutating, [], "opening the flow only reads");
+
+  await cleanup();
+});
+
 test("escape cancels the flow through the dialog's own close hook", async () => {
   const dir = scriptsFixture();
   const tmpRoot = path.join(dir, "git-tmp");
@@ -1981,7 +2633,7 @@ test("escape cancels the flow through the dialog's own close hook", async () => 
 
   runtime.openGit("commit");
   await until(() => flow.state()?.step === "files", "the file list");
-  flow.toggle("src/a.ts");
+  assert.deepEqual(flow.state().selection, ["src/a.ts"], "the confirmed session change starts checked");
   await flow.previewSelection();
 
   // The host closes the top dialog on escape and calls this hook. The flow ends
@@ -3427,6 +4079,307 @@ test("the editor reports each button's own working directory, not the project ke
   const dev = items.find((item) => item.id.startsWith("script:"));
   assert.ok(dev, "the nested package's own script is listed");
   assert.equal(dev.cwd, nested);
+
+  await cleanup();
+});
+
+// ------------------------------------------------ button order (Move up/down)
+
+// Discovery order for a directory, independent of any saved order, so a test
+// can state what the default catalog should be.
+function discoveryIds(root) {
+  return discoverActions(createProjectDetector().detect(root)).map((action) => action.id);
+}
+
+function openRuntime({ root, buttonConfigFile, spawn = createFakeSpawn() } = {}) {
+  const { context, calls } = createContext({
+    locationDirectory: root,
+    sessions: { s1: { directory: root } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+  });
+  const start = () =>
+    startPlugin(context, view, { spawn, notifyMs: 0, buttonConfigFile });
+  return { context, calls, spawn, start };
+}
+
+test("moveButton reorders the sidebar, settings, editor and palette together", async () => {
+  const root = scriptsFixture();
+  const { calls, spawn, start } = openRuntime({ root });
+  const cleanup = await start();
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+
+  const before = runtime.actionDescriptors().map((descriptor) => descriptor.id);
+  assert.ok(before.length >= 3, "the fixture has several runners");
+  const [first, second] = before;
+
+  const moved = runtime.moveButton(second, "up");
+  assert.deepEqual(moved, {
+    ok: true,
+    id: second,
+    moved: true,
+    order: [second, first, ...before.slice(2)],
+  });
+
+  const after = runtime.actionDescriptors().map((descriptor) => descriptor.id);
+  assert.deepEqual(after, [second, first, ...before.slice(2)], "the catalog order changed");
+  assert.deepEqual(runtime.buttonEditorItems().map((item) => item.id), after, "the editor follows");
+  assert.deepEqual(runtime.rows("s1").items.map((item) => item.action.id), after, "the sidebar follows");
+  assert.deepEqual(
+    runtime.settingsItems().map((item) => item.id).slice(0, after.length),
+    after,
+    "the settings list follows, before the built-ins",
+  );
+  const titles = new Map(runtime.actionDescriptors().map((descriptor) => [descriptor.id, descriptor.title]));
+  assert.deepEqual(
+    calls.layers[0].commands.slice(0, after.length).map((command) => command.title),
+    after.map((id) => `Launchpad: ${titles.get(id)}`),
+    "the palette follows",
+  );
+  assert.equal(spawn.calls.length, 0, "reordering never runs anything");
+
+  await cleanup();
+});
+
+test("a boundary move, a built-in, a bad direction and an unknown id are refused safely", async () => {
+  const root = scriptsFixture();
+  const file = path.join(fixture({}), "buttons.json");
+  const { calls, start } = openRuntime({ root, buttonConfigFile: file });
+  const cleanup = await start();
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const ids = runtime.actionDescriptors().map((descriptor) => descriptor.id);
+  const exists = () => {
+    try {
+      readFileSync(file);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  assert.equal(exists(), false, "setup writes nothing");
+
+  assert.deepEqual(
+    runtime.moveButton(ids[0], "up"),
+    { ok: true, id: ids[0], moved: false },
+    "the first button cannot move up",
+  );
+  assert.deepEqual(
+    runtime.moveButton(ids[ids.length - 1], "down"),
+    { ok: true, id: ids[ids.length - 1], moved: false },
+    "the last cannot move down",
+  );
+  assert.equal(exists(), false, "a boundary move writes nothing");
+
+  assert.deepEqual(
+    runtime.moveButton("commit", "up"),
+    { ok: false, code: "control-locked", reason: "This button is built in and cannot be reordered." },
+    "a built-in is not reorderable",
+  );
+  assert.deepEqual(runtime.moveButton(ids[0], "sideways"), {
+    ok: false,
+    code: "invalid-direction",
+    reason: "Direction must be up or down.",
+  });
+  assert.deepEqual(runtime.moveButton("nope", "up"), {
+    ok: false,
+    code: "unknown-action",
+    reason: "That button is not part of this project.",
+  });
+  assert.equal(exists(), false, "no refusal wrote anything");
+  assert.equal(runtime.buttonConfigError(), null);
+
+  await cleanup();
+});
+
+test("an order is per project and a stale capture cannot move it", async () => {
+  const first = scriptsFixture();
+  const second = scriptsFixture();
+  const file = path.join(fixture({}), "buttons.json");
+  let session = "s1";
+  const { context, calls } = createContext({
+    locationDirectory: first,
+    sessions: { s1: { directory: first }, s2: { directory: second } },
+    route: () => ({ type: "session", sessionID: session }),
+  });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    buttonConfigFile: file,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+
+  const firstIds = runtime.actionDescriptors().map((descriptor) => descriptor.id);
+  const captured = runtime.buttonProject();
+  assert.equal(captured, first);
+
+  session = "s2";
+  const secondBefore = runtime.actionDescriptors().map((descriptor) => descriptor.id);
+  assert.deepEqual(
+    runtime.moveButton(firstIds[1], "up", captured),
+    { ok: false, code: "project-changed", reason: "Project changed. Reopen the button editor." },
+    "a move captured in the first project is refused after the switch",
+  );
+  assert.deepEqual(
+    runtime.actionDescriptors().map((descriptor) => descriptor.id),
+    secondBefore,
+    "the second project is untouched",
+  );
+
+  session = "s1";
+  assert.equal(runtime.moveButton(firstIds[1], "up", captured).ok, true, "a matching capture is accepted");
+  const stored = JSON.parse(readFileSync(file, "utf8")).projects;
+  assert.ok(stored[first], "only the first project has an order");
+  assert.equal(stored[second], undefined, "the second project was never written");
+
+  await cleanup();
+});
+
+test("a saved order survives a restart", async () => {
+  const root = scriptsFixture();
+  const file = path.join(fixture({}), "buttons.json");
+  const firstIds = discoveryIds(root);
+
+  const first = openRuntime({ root, buttonConfigFile: file });
+  const cleanupFirst = await first.start();
+  const rt1 = first.calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  assert.equal(rt1.moveButton(firstIds[2], "up").ok, true);
+  await cleanupFirst();
+
+  const second = openRuntime({ root, buttonConfigFile: file });
+  const cleanupSecond = await second.start();
+  const rt2 = second.calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  assert.deepEqual(
+    rt2.actionDescriptors().map((descriptor) => descriptor.id),
+    [firstIds[0], firstIds[2], firstIds[1], ...firstIds.slice(3)],
+    "the reordered catalog comes back",
+  );
+  assert.equal(rt2.buttonConfigError(), null);
+
+  await cleanupSecond();
+});
+
+test("an old document with no order reads in discovery order", async () => {
+  const root = scriptsFixture();
+  const file = path.join(fixture({}), "buttons.json");
+  writeFileSync(
+    file,
+    `${JSON.stringify({
+      version: 1,
+      projects: { [root]: { overrides: { "build-mobile": { label: "Ship it", command: "bash", args: [] } } } },
+      custom: [],
+    })}\n`,
+  );
+  const { calls, start } = openRuntime({ root, buttonConfigFile: file });
+  const cleanup = await start();
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+
+  assert.deepEqual(
+    runtime.actionDescriptors().map((descriptor) => descriptor.id),
+    discoveryIds(root),
+    "no stored order means the discovery order",
+  );
+  assert.equal(
+    runtime.rows("s1").items.find((item) => item.action.id === "build-mobile").action.label,
+    "Ship it",
+    "the old override still applies",
+  );
+  assert.equal(runtime.moveButton(discoveryIds(root)[1], "up").ok, true, "and a move still works");
+
+  await cleanup();
+});
+
+test("a stored order skips a removed id and appends a newly discovered one", async () => {
+  const root = scriptsFixture();
+  const file = path.join(fixture({}), "buttons.json");
+  const defaultOrder = discoveryIds(root);
+  const customId = "custom:keeper";
+  // The order names one live button, one that no longer exists, and a custom
+  // button. Every other discovered button is "new" and must append.
+  writeFileSync(
+    file,
+    `${JSON.stringify({
+      version: 1,
+      projects: { [root]: { overrides: {}, order: [defaultOrder[1], "gone", customId] } },
+      custom: [{ id: customId, project: root, label: "Mine", command: "bash", args: ["x"] }],
+    })}\n`,
+  );
+  const { calls, start } = openRuntime({ root, buttonConfigFile: file });
+  const cleanup = await start();
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+
+  const expected = [defaultOrder[1], customId, ...defaultOrder.filter((id) => id !== defaultOrder[1])];
+  assert.deepEqual(runtime.actionDescriptors().map((descriptor) => descriptor.id), expected);
+  assert.equal(expected.includes("gone"), false, "the removed id is not a button");
+
+  await cleanup();
+});
+
+test("a hidden button keeps its place and the settings list still shows it", async () => {
+  const root = scriptsFixture();
+  const { calls, start } = openRuntime({ root });
+  const cleanup = await start();
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const ids = runtime.actionDescriptors().map((descriptor) => descriptor.id);
+  const hidden = ids[1];
+
+  runtime.setVisible(hidden, false);
+  assert.equal(runtime.moveButton(ids[2], "up").ok, true, "the button below swaps with the hidden one");
+
+  const after = runtime.actionDescriptors().map((descriptor) => descriptor.id);
+  assert.deepEqual(after, [ids[0], ids[2], hidden, ...ids.slice(3)], "the hidden button kept its place");
+  const rows = runtime.rows("s1").items.map((item) => item.action.id);
+  assert.equal(rows.includes(hidden), false, "the hidden button is not a row");
+  assert.deepEqual(rows, after.filter((id) => id !== hidden), "the visible rows keep the order");
+  const settings = runtime.settingsItems().map((item) => item.id);
+  assert.equal(settings.includes(hidden), true, "the settings list still shows the hidden button");
+  assert.equal(settings.indexOf(hidden), after.indexOf(hidden), "in its place");
+
+  await cleanup();
+});
+
+test("a hand-added button reorders among discovered scripts and Cargo actions", async () => {
+  const root = fixture({
+    ".git/HEAD": "ref: refs/heads/main\n",
+    "Cargo.toml": "[package]\nname = \"mix\"\n",
+    "package.json": { scripts: { test: "node --test", build: "node build.js" } },
+  });
+  const { calls, start } = openRuntime({ root });
+  const cleanup = await start();
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+
+  const ids = runtime.actionDescriptors().map((descriptor) => descriptor.id);
+  assert.ok(ids.some((id) => id.startsWith("cargo-")), "Cargo actions are discovered");
+  assert.ok(ids.some((id) => id.startsWith("script:")), "and so are the scripts");
+
+  const added = runtime.saveButton({ label: "Deploy", command: "bash", args: ["ship.sh"] });
+  assert.equal(added.ok, true);
+  const withCustom = runtime.actionDescriptors().map((descriptor) => descriptor.id);
+  assert.equal(withCustom[withCustom.length - 1], added.id, "a new custom button appends");
+
+  assert.equal(runtime.moveButton(added.id, "up").ok, true);
+  const after = runtime.actionDescriptors().map((descriptor) => descriptor.id);
+  assert.deepEqual(
+    after,
+    [...withCustom.slice(0, -2), added.id, withCustom[withCustom.length - 2]],
+    "the custom button swaps with its neighbour",
+  );
+
+  await cleanup();
+});
+
+test("reordering never changes a run's identity or starts anything", async () => {
+  const root = scriptsFixture();
+  const { calls, spawn, start } = openRuntime({ root });
+  const cleanup = await start();
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const ids = runtime.actionDescriptors().map((descriptor) => descriptor.id);
+
+  const started = runtime.startAction(ids[0]);
+  assert.equal(started.ok, true);
+  const spawns = spawn.calls.length;
+  assert.equal(runtime.moveButton(ids[0], "down").ok, true);
+  assert.equal(spawn.calls.length, spawns, "a move does not spawn");
+  assert.ok(runtime.snapshot(started.key), "the run is still tracked under the same key");
+  assert.equal(runtime.snapshot(started.key).actionId, ids[0], "its action id is unchanged");
 
   await cleanup();
 });

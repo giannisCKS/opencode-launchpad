@@ -64,6 +64,47 @@ function emptyDoc() {
   return { version: FILE_VERSION, projects: {}, custom: [] };
 }
 
+// A project's stored button order: a list of stable action ids. Anything that
+// is not a non-empty string is dropped, and a repeat keeps its first place, so
+// a hand-edited order can never make the list ambiguous or duplicate a button.
+function readOrder(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const order = [];
+  for (const id of value) {
+    if (typeof id !== "string" || !id || seen.has(id)) continue;
+    seen.add(id);
+    order.push(id);
+  }
+  return order;
+}
+
+function cloneOrder(order) {
+  return Array.isArray(order) ? order.slice() : [];
+}
+
+function readEntry(entry) {
+  const kept = {};
+  const overrides = entry && typeof entry === "object" ? entry.overrides : undefined;
+  if (overrides && typeof overrides === "object") {
+    for (const [id, patch] of Object.entries(overrides)) {
+      const clean = readPatch(patch);
+      if (typeof id === "string" && id && clean) kept[id] = clean;
+    }
+  }
+  const order = readOrder(entry && typeof entry === "object" ? entry.order : undefined);
+  return { overrides: kept, order };
+}
+
+function cloneEntry(entry) {
+  const overrides = {};
+  for (const [id, patch] of Object.entries(entry.overrides ?? {})) overrides[id] = clonePatch(patch);
+  const next = { overrides };
+  const order = cloneOrder(entry.order);
+  if (order.length) next.order = order;
+  return next;
+}
+
 function hasNul(value) {
   return value.includes("\u0000");
 }
@@ -141,14 +182,12 @@ function readDoc(value) {
   if (projects && typeof projects === "object") {
     for (const [dir, entry] of Object.entries(projects)) {
       if (typeof dir !== "string" || !dir) continue;
-      const overrides = entry && typeof entry === "object" ? entry.overrides : undefined;
-      if (!overrides || typeof overrides !== "object") continue;
-      const kept = {};
-      for (const [id, patch] of Object.entries(overrides)) {
-        const clean = readPatch(patch);
-        if (typeof id === "string" && id && clean) kept[id] = clean;
+      const clean = readEntry(entry);
+      if (Object.keys(clean.overrides).length || clean.order.length) {
+        doc.projects[dir] = clean.order.length
+          ? { overrides: clean.overrides, order: clean.order }
+          : { overrides: clean.overrides };
       }
-      if (Object.keys(kept).length) doc.projects[dir] = { overrides: kept };
     }
   }
   if (Array.isArray(value.custom)) {
@@ -170,9 +209,7 @@ function clonePatch(patch) {
 function cloneDoc(doc) {
   const next = emptyDoc();
   for (const [dir, entry] of Object.entries(doc.projects)) {
-    const overrides = {};
-    for (const [id, patch] of Object.entries(entry.overrides)) overrides[id] = clonePatch(patch);
-    next.projects[dir] = { overrides };
+    next.projects[dir] = cloneEntry(entry);
   }
   next.custom = doc.custom.map((entry) => ({ ...clonePatch(entry), id: entry.id, project: entry.project }));
   return next;
@@ -194,7 +231,18 @@ export function applyButtonOps(doc, ops) {
       const entry = next.projects[op.dir];
       if (!entry) continue;
       delete entry.overrides[op.id];
-      if (!Object.keys(entry.overrides).length) delete next.projects[op.dir];
+      if (!Object.keys(entry.overrides).length && !cloneOrder(entry.order).length) {
+        delete next.projects[op.dir];
+      }
+    } else if (op.op === "order") {
+      // The order is a whole list, written as one operation, so replaying it
+      // twice cannot change the result. An empty list clears it rather than
+      // storing a document that says nothing.
+      const entry = next.projects[op.dir] ?? { overrides: {} };
+      const order = readOrder(op.ids);
+      if (order.length) entry.order = order;
+      else delete entry.order;
+      next.projects[op.dir] = entry;
     } else if (op.op === "custom-add") {
       const fresh = { ...clonePatch(op.value), id: op.id, project: op.dir };
       const index = next.custom.findIndex((item) => item.id === op.id);
@@ -474,6 +522,26 @@ export function createButtonConfigStore(options = {}) {
       if (!entry) return map;
       for (const [id, patch] of Object.entries(entry.overrides)) map.set(id, clonePatch(patch));
       return map;
+    },
+    // This project's stored button order, or an empty list when it has never
+    // been reordered. The ids are opaque to this store: it never checks them
+    // against discovery, so an id the project no longer has is harmless.
+    orderFor(dir) {
+      if (typeof dir !== "string" || !dir) return [];
+      return cloneOrder(current().projects[dir]?.order);
+    },
+    // Replace this project's button order with one whole list, written as a
+    // single operation. The list is normalized (strings, no repeats) and an
+    // empty one is refused, so a move can never silently erase the order.
+    saveOrder(dir, ids) {
+      if (typeof dir !== "string" || !dir) return fail("unknown-project", "No project is active.");
+      if (!Array.isArray(ids)) {
+        return fail("invalid-order", "The button order must be a list of ids.");
+      }
+      const order = readOrder(ids);
+      if (!order.length) return fail("invalid-order", "The button order cannot be empty.");
+      commit({ op: "order", dir, ids: order });
+      return { ok: true, order };
     },
     // Every custom button of one project, in creation order. A custom button
     // keeps the directory it was created in, which is also its working

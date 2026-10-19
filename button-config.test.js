@@ -546,3 +546,67 @@ test("a save that lands later never marks a newer unsaved edit as saved", async 
   assert.equal(store.writes(), 2);
   assert.deepEqual(store.customFor("/repo").map((entry) => entry.label), ["One", "Two", "Three"]);
 });
+
+// --------------------------------------------------------------- button order
+
+test("a saved order persists, reloads, and stays per project", () => {
+  const file = path.join(tempDir(), "buttons.json");
+  const store = createButtonConfigStore({ file });
+  assert.deepEqual(store.orderFor("/tmp/a"), [], "no order before one is saved");
+  assert.deepEqual(store.saveOrder("/tmp/a", ["b", "a", "c"]), { ok: true, order: ["b", "a", "c"] });
+
+  const onDisk = JSON.parse(readFileSync(file, "utf8")).projects["/tmp/a"];
+  assert.deepEqual(onDisk.order, ["b", "a", "c"], "the order is written beside the overrides");
+
+  const reloaded = createButtonConfigStore({ file });
+  assert.deepEqual(reloaded.orderFor("/tmp/a"), ["b", "a", "c"], "and read back");
+  assert.deepEqual(reloaded.orderFor("/tmp/b"), [], "another project has no order of its own");
+});
+
+test("an order is normalized: only non-empty strings, first occurrence kept", () => {
+  const file = path.join(tempDir(), "buttons.json");
+  const store = createButtonConfigStore({ file });
+  store.saveOrder("/tmp/a", ["a", "", "a", 7, "b", null, "b"]);
+  assert.deepEqual(store.orderFor("/tmp/a"), ["a", "b"]);
+
+  assert.deepEqual(store.saveOrder("/tmp/a", []).code, "invalid-order", "an empty order is refused");
+  assert.deepEqual(store.saveOrder("/tmp/a", "nope").code, "invalid-order", "a non-list is refused");
+  assert.deepEqual(store.orderFor("/tmp/a"), ["a", "b"], "and a refused save changes nothing");
+});
+
+test("an old document with no order still reads, overrides intact", () => {
+  const file = path.join(tempDir(), "buttons.json");
+  writeFileSync(
+    file,
+    `${JSON.stringify({
+      version: 1,
+      projects: { "/tmp/a": { overrides: { "build-mobile": { label: "Ship it", command: "bash", args: [] } } } },
+      custom: [],
+    })}\n`,
+  );
+  const store = createButtonConfigStore({ file });
+  assert.equal(store.overridesFor("/tmp/a").get("build-mobile").label, "Ship it");
+  assert.deepEqual(store.orderFor("/tmp/a"), [], "a missing order is simply empty");
+  assert.equal(store.error(), null);
+});
+
+test("an order survives an override, a reset and a custom edit unchanged", () => {
+  const store = createButtonConfigStore({ storage: fakeDurableStore(), newId: () => "custom:1" });
+  store.saveOrder("/repo", ["b", "a", "custom:1"]);
+  store.saveOverride("/repo", "b", { label: "Bee", command: "bash", args: [] });
+  assert.deepEqual(store.orderFor("/repo"), ["b", "a", "custom:1"], "an override keeps the order");
+  store.addCustom("/repo", { label: "Mine", command: "bash", args: ["x"] });
+  assert.deepEqual(store.orderFor("/repo"), ["b", "a", "custom:1"], "a custom edit keeps the order");
+  store.resetOverride("/repo", "b");
+  assert.deepEqual(store.orderFor("/repo"), ["b", "a", "custom:1"], "a reset keeps the order");
+  assert.deepEqual([...store.overridesFor("/repo").keys()], [], "and only the override was cleared");
+});
+
+test("replaying an order operation is idempotent and ignores unknown ids", () => {
+  const base = { version: 1, projects: { "/tmp/a": { overrides: {} } }, custom: [] };
+  const op = { op: "order", dir: "/tmp/a", ids: ["b", "gone", "a"] };
+  const once = applyButtonOps(base, [op]);
+  const twice = applyButtonOps(once, [op]);
+  assert.deepEqual(twice, once, "applying it twice changes nothing");
+  assert.deepEqual(twice.projects["/tmp/a"].order, ["b", "gone", "a"], "an id with no button is stored, not guessed at");
+});

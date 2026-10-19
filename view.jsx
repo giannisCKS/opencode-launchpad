@@ -527,7 +527,7 @@ export function GitDialog(props) {
 
         <Show when={step("files")}>
           <text fg={token(theme, "textMuted")} wrapMode="word">
-            Session changes are suggestions, not a selection. Pick every file by hand.
+            Session changes are preselected. Review the selection before continuing.
           </text>
           <scrollbox scrollY flexGrow={1} minHeight={4} maxHeight={16}>
             <box flexDirection="column">
@@ -690,6 +690,32 @@ function isBuiltin(item) {
   return BUILTIN_CONTROLS.has(item?.id);
 }
 
+// One move control: a small click target that steps a runner one place up or
+// down the list. A disabled control - the first up, the last down - still shows
+// where the button could go, but its colour never lifts and its click never
+// fires, so the ends of the list read as the ends. The single arrow glyph is
+// padded to two columns: a one column target is too small to hit reliably.
+function MoveControl(props) {
+  const theme = props.theme;
+  const [hover, setHover] = createSignal(false);
+  const lit = () => props.enabled && hover();
+  return (
+    <box
+      paddingLeft={1}
+      onMouseOver={() => setHover(true)}
+      onMouseOut={() => setHover(false)}
+      onMouseUp={() => {
+        if (!props.enabled) return;
+        props.onPress();
+      }}
+    >
+      <text fg={lit() ? token(theme, "textBase") : token(theme, "textMuted")} wrapMode="none">
+        {props.label}
+      </text>
+    </box>
+  );
+}
+
 function SettingsRow(props) {
   const theme = props.theme;
   const item = () => props.item;
@@ -699,9 +725,30 @@ function SettingsRow(props) {
   // the sidebar. Hovering brightens the row so the click target is visible.
   const fg = () => (item().visible || hover() ? token(theme, "textBase") : token(theme, "textMuted"));
   return (
-    // The toggle and the editor are siblings, never nested: one click target
-    // each, and the toggle keeps the wide left side of the row.
+    // The two move controls, the toggle and the editor are siblings, never
+    // nested: one click target each, so a click on a move control can never
+    // reach the toggle behind it and a move never flips a button's visibility.
+    // The moves sit left of the name and the editor sits right, so the eye reads
+    // "step this button, then the button, then edit it".
     <box flexDirection="row" gap={1}>
+      {/* A runner can be moved; a built-in control is fixed, so its row carries
+          no move control at all, the same way it carries no editor. The drawn
+          glyph is the control's name: this host draws no separate accessibility
+          text, so an arrow is the whole label. Two arrows, two hit targets. */}
+      <Show when={props.movable}>
+        <MoveControl
+          theme={theme}
+          label="↑"
+          enabled={props.canUp}
+          onPress={() => props.onMove(item(), "up")}
+        />
+        <MoveControl
+          theme={theme}
+          label="↓"
+          enabled={props.canDown}
+          onPress={() => props.onMove(item(), "down")}
+        />
+      </Show>
       <box
         flexDirection="row"
         gap={1}
@@ -786,6 +833,10 @@ export function SettingsDialog(props) {
   const [formError, setFormError] = createSignal(null);
   const [draft, setDraft] = createSignal(null);
   const [pending, setPending] = createSignal(null);
+  // A refused move (a project that changed, a button the runtime no longer
+  // knows) is shown on its own line, so a reorder that did not land never looks
+  // like it did.
+  const [moveError, setMoveError] = createSignal(null);
   // The dialog learns its own height from the box the host lays out. Zero means
   // the host never reported one, and the seventeen row dialog is assumed.
 
@@ -801,6 +852,14 @@ export function SettingsDialog(props) {
   });
   const scripts = createMemo(() => items().filter((item) => !isBuiltin(item)));
   const builtins = createMemo(() => items().filter((item) => isBuiltin(item)));
+  // The move controls act on the runners only, hidden ones included, so their
+  // ends are the ends of the runner list and never the built-in controls below.
+  const runnerIndex = (item) => scripts().findIndex((each) => each.id === item.id);
+  const canMoveUp = (item) => runnerIndex(item) > 0;
+  const canMoveDown = (item) => {
+    const at = runnerIndex(item);
+    return at >= 0 && at < scripts().length - 1;
+  };
   // Hidden ids are stored for the whole install, and "Show all buttons" clears
   // every one of them, not only the ids this project can draw. The runtime
   // counts them all, so the footer counts that: a project with nothing hidden
@@ -859,6 +918,7 @@ export function SettingsDialog(props) {
     () =>
       (error()?.message ? 1 : 0) +
       (configError()?.message ? 1 : 0) +
+      (moveError() ? 1 : 0) +
       (hiddenCount() > 0 ? 2 : 0),
   );
   // The box is one row taller than its content: the renderer draws one row less
@@ -1049,6 +1109,29 @@ export function SettingsDialog(props) {
     if (!result || result.ok !== false) return null;
     return typeof result.reason === "string" && result.reason !== "" ? result.reason : fallback;
   };
+  // Moving a runner carries the project the dialog captured when it opened, the
+  // same safeguard the editor uses: a session switched while the list is open
+  // must not reorder the project that is open now. The runtime may also refuse
+  // and say why; the reason is shown instead of a silent no-op. A move at either
+  // end is a no-op the disabled control already prevents, so it writes nothing.
+  const move = (item, direction) => {
+    if (!item || typeof item.id !== "string" || item.id === "") return;
+    let result = null;
+    try {
+      result =
+        typeof runtime.moveButton === "function"
+          ? runtime.moveButton(item.id, direction, capturedProject)
+          : null;
+    } catch {
+      result = null;
+    }
+    const reason = refused(result, "Could not move the button.");
+    if (reason) {
+      setMoveError(reason);
+      return;
+    }
+    setMoveError(null);
+  };
   const reset = () => {
     const current = draft();
     if (!current?.id) return;
@@ -1159,6 +1242,11 @@ export function SettingsDialog(props) {
             {configError().message}
           </text>
         </Show>
+        <Show when={moveError()}>
+          <text fg={token(theme, "textError")} wrapMode="word">
+            {moveError()}
+          </text>
+        </Show>
         {/* The list scrolls: a project with many scripts keeps the footer in
             reach, and a short dialog shrinks the list instead of overlapping the
             lines above it. */}
@@ -1175,7 +1263,17 @@ export function SettingsDialog(props) {
               </text>
               <For each={scripts()}>
                 {(item) => (
-                  <SettingsRow theme={theme} item={item} editable={editableById().has(item.id)} onToggle={toggle} onEdit={startEdit} />
+                  <SettingsRow
+                    theme={theme}
+                    item={item}
+                    movable
+                    canUp={canMoveUp(item)}
+                    canDown={canMoveDown(item)}
+                    editable={editableById().has(item.id)}
+                    onToggle={toggle}
+                    onMove={move}
+                    onEdit={startEdit}
+                  />
                 )}
               </For>
             </box>
