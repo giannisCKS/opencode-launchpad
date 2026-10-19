@@ -1,0 +1,56 @@
+{
+  "name": "opencode-launchpad",
+  "version": "0.1.0",
+  "description": "OpenCode TUI plugin: project runner buttons, reviewed commit and push flows, and a live log dialog in the session sidebar.",
+  "type": "module",
+  "license": "MIT",
+  "author": "giannisCKS",
+  "homepage": "https://github.com/giannisCKS/opencode-launchpad#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/giannisCKS/opencode-launchpad.git"
+  },
+  "bugs": {
+    "url": "https://github.com/giannisCKS/opencode-launchpad/issues"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "tui",
+    "plugin"
+  ],
+  "main": "./tui.js",
+  "exports": {
+    ".": "./tui.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "tui.js",
+    "runners.js",
+    "git.js",
+    "git-detection.js",
+    "visibility.js",
+    "button-config.js",
+    "view.jsx",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "@opentui/solid": "*",
+    "solid-js": "*"
+  },
+  "peerDependenciesMeta": {
+    "@opentui/solid": {
+      "optional": true
+    },
+    "solid-js": {
+      "optional": true
+    }
+  }
+}
