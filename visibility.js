@@ -292,7 +292,7 @@ export function createVisibilityStore(options = {}) {
   }
 
   function notify(reason) {
-    for (const listener of [...listeners]) {
+    for (const listener of Array.from(listeners)) {
       try {
         listener(reason);
       } catch {
@@ -310,7 +310,9 @@ export function createVisibilityStore(options = {}) {
     // The failure behind `ready` being false, or null. `code` is one of
     // "store-unavailable", "read-failed", "save-failed", "persist-unavailable".
     error() {
-      return writeError ?? loadError ?? null;
+      if (writeError) return writeError;
+      if (loadError) return loadError;
+      return null;
     },
     isVisible(id) {
       if (typeof id !== "string" || !id) return true;
@@ -352,7 +354,11 @@ export function createVisibilityStore(options = {}) {
     // `listener(reason)` with reason "change" or "error". The disposer removes
     // the listener and never throws.
     subscribe(listener) {
-      if (typeof listener !== "function") return () => {};
+      if (typeof listener !== "function") {
+        return () => {
+          // Intended no-op: a non-function subscriber has nothing to remove.
+        };
+      }
       listeners.add(listener);
       return () => listeners.delete(listener);
     },

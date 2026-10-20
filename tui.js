@@ -8,7 +8,7 @@ import {
   resolveAction,
   resolveSessionDirectory,
 } from "./runners.js";
-import { createGitActions } from "./git.js";
+import { createGitActions, LUNA_MODEL, selectCommitGenerator } from "./git.js";
 import { CONTROL_ITEMS, createVisibilityStore, defaultVisibilityFile } from "./visibility.js";
 import { createGitDetector } from "./git-detection.js";
 import { createButtonConfigStore, defaultButtonConfigFile } from "./button-config.js";
@@ -55,6 +55,15 @@ export function createRuntime({
   // Last session seen by the sidebar: the router is not the only source of truth.
   let lastSessionID;
 
+  // The log dialog this runtime opened, if it is still the one on screen. A
+  // token identity (not a key or a boolean) makes a stale close callback unable
+  // to clear a newer log dialog or a replacement host dialog.
+  let ownedLog;
+
+  function releaseOwnedLog() {
+    ownedLog = undefined;
+  }
+
   // A refused keystroke is reported rather than looking like a success: the run
   // may have exited, never take reload input, or still be running with the
   // command stream closed (a delivery failure, not a reload).
@@ -77,11 +86,46 @@ export function createRuntime({
     if (!key || !manager.snapshot(key)) return false;
     // The dialog's own modal layer drives the run through this runtime, so a
     // key reaches the same path as the buttons without any shared state.
-    try {
-      context.ui?.dialog?.show?.(() => view.LogDialog({ context, runtime, runKey: key }));
-      context.ui?.dialog?.set?.({ size: "large" });
-    } catch {
+    const token = {};
+    ownedLog = token;
+    // A close through either the host stack or the view releases ownership only
+    // for this exact dialog. A stale callback from a replaced log dialog must
+    // not clear whatever dialog is on screen now.
+    const onClose = () => {
+      if (ownedLog === token) ownedLog = undefined;
+    };
+    const render = () => view.LogDialog({ context, runtime, runKey: key, onClose });
+    const dialog = context.ui?.dialog;
+    const open = () => {
+      if (typeof dialog?.replace === "function") {
+        try {
+          dialog.replace(render, onClose);
+          return () => dialog.setSize?.("large");
+        } catch {
+          // fall through to the older API
+        }
+      }
+      if (typeof dialog?.show === "function") {
+        try {
+          dialog.show(render, onClose);
+          return () => dialog.set?.({ size: "large" });
+        } catch {
+          // fall through to the failed-open path
+        }
+      }
+      return undefined;
+    };
+
+    const resize = open();
+    if (!resize) {
+      if (ownedLog === token) ownedLog = undefined;
       return false;
+    }
+    // Sizing is cosmetic and runs after the dialog is already open.
+    try {
+      resize();
+    } catch {
+      // ignore: the dialog is open
     }
     return true;
   }
@@ -227,12 +271,9 @@ export function createRuntime({
     return ordered;
   }
 
-  // What a button will actually run. An overridden command replaces the
-  // executable, the arguments and the display, and clears the action's own env
-  // and stdin, so a build define from the original action can never be injected
-  // into an arbitrary command. The action id and the working directory are
-  // preserved, which is what keeps the run's key - and therefore its log and its
-  // stop target - stable across an edit.
+  // An overridden command clears the action's own env and stdin, so a build
+  // define cannot leak into an arbitrary command. The preserved id and cwd keep
+  // the run's log and stop target stable across an edit.
   function resolveEffective(descriptor, project) {
     if (descriptor.custom) {
       return {
@@ -450,6 +491,109 @@ export function createRuntime({
     return text.call(generate, payload, callOptions);
   }
 
+  // Resolve the Luna generator before the user is offered the Generate action. The
+  // probe reads only provider and model metadata; it never calls a model. A host
+  // that exposes neither route keeps the historical configured OpenCodex model,
+  // because there is nothing truthful to compare it with. A host that exposes
+  // only one route, or whose probe throws or stalls, is refused: a partial or
+  // silent catalog cannot prove that the proxy is absent or that native Luna
+  // exists. The deadline bounds a host that never answers.
+  const GENERATOR_PROBE_TIMEOUT_MS = 10_000;
+  async function probeCommitGenerator() {
+    const provider = context?.client?.provider;
+    const model = context?.client?.model;
+    const listProviders = provider?.list;
+    const listModels = model?.list;
+    const hasProviders = typeof listProviders === "function";
+    const hasModels = typeof listModels === "function";
+    // Generation must be possible before the Generate action is enabled. The
+    // service must actually expose the call the action uses, and an injected
+    // generator or the host adapter must back it. An injected generator is the
+    // supported test/embedding override; otherwise the host adapter must exist,
+    // including on the legacy host whose catalog cannot be probed.
+    const actions = service();
+    const hasGenerator =
+      typeof actions?.generateMessage === "function" &&
+      (typeof gitOptions?.generateText === "function" ||
+        typeof git?.generateMessage === "function" ||
+        typeof context?.client?.generate?.text === "function");
+    if (!hasGenerator) {
+      return {
+        ok: false,
+        error: {
+          code: "generation-unavailable",
+          message: "No commit message generator is connected",
+        },
+      };
+    }
+    const legacy = {
+      source: "opencodex",
+      providerID: LUNA_MODEL.providerID,
+      id: LUNA_MODEL.id,
+      variant: LUNA_MODEL.variant,
+      providerName: "OpenCodex",
+      modelName: LUNA_MODEL.id,
+      // The legacy host exposes no catalog to verify this destination against.
+      // The view says so; this is the assumed default, never a verified route.
+      verified: false,
+    };
+    if (!hasProviders && !hasModels) return { ok: true, generator: legacy };
+    if (!hasProviders || !hasModels) {
+      return {
+        ok: false,
+        error: {
+          code: "generator-probe-failed",
+          message: "This host cannot list both providers and models, so the Luna generator cannot be checked.",
+        },
+      };
+    }
+    let timer;
+    try {
+      // No request options are passed: the installed metadata signatures do not
+      // document an abort signal, so the deadline races the calls instead.
+      // Each call runs inside its own then: a route that throws synchronously is
+      // still a rejected promise, so Promise.all observes it and the catch below
+      // reports the probe failure instead of escaping the try as a raw throw.
+      const metadata = Promise.all([
+        Promise.resolve().then(() => listProviders.call(provider)),
+        Promise.resolve().then(() => listModels.call(model)),
+      ]);
+      // The deadline can win while the metadata request is still in flight. Its
+      // eventual rejection is consumed here so it is never an unhandled rejection.
+      metadata.catch(() => {});
+      const timedOut = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error("generator metadata deadline exceeded");
+          error.code = "generator-probe-timeout";
+          reject(error);
+        }, GENERATOR_PROBE_TIMEOUT_MS);
+      });
+      const [providers, models] = await Promise.race([metadata, timedOut]);
+      const selected = selectCommitGenerator({ providers: providers?.data, models: models?.data });
+      if (!selected?.ok || !selected.generator) return selected;
+      return { ...selected, generator: { ...selected.generator, verified: true } };
+    } catch (error) {
+      if (error?.code === "generator-probe-timeout") {
+        return {
+          ok: false,
+          error: {
+            code: "generator-probe-failed",
+            message: "The host timed out while returning provider and model metadata, so the Luna generator could not be checked.",
+          },
+        };
+      }
+      return {
+        ok: false,
+        error: {
+          code: "generator-probe-failed",
+          message: "The Luna generator could not be checked from the host provider and model lists.",
+        },
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   // The Git controls are disabled while no service exists, and they say why
   // instead of failing silently. `reason` is optional and only used to make that
   // message specific (for example "git is not installed").
@@ -461,11 +605,33 @@ export function createRuntime({
   }
 
   // The commit flow: a small state machine the dialog drives. Its state lives
-  // here rather than in the view, because the message prompt replaces the dialog
-  // and the flow has to survive that remount.
+  // here rather than in the view, so the view only ever reads and calls it.
   let flow = null;
   let flowGeneration = 0;
   const flowListeners = new Set();
+  // The two service calls that own a token and private state until they settle.
+  // A cancelled dialog must not release either while git is still using them.
+  const COMMIT_BUSY = "committing the selected files";
+  const PUSH_BUSY = "pushing";
+
+  function mutationInFlight(current) {
+    return current?.busy === COMMIT_BUSY || current?.busy === PUSH_BUSY;
+  }
+
+  // Drop the tokens a closed flow still owns. Called only after the mutation
+  // settled, so the service is no longer using its index or preview.
+  function releaseClosedTokens(current) {
+    for (const key of ["token", "pushToken"]) {
+      const token = current?.[key];
+      if (!token) continue;
+      current[key] = null;
+      try {
+        current.actions?.discard?.({ token });
+      } catch {
+        // best effort: an unknown token means the service already dropped it
+      }
+    }
+  }
 
   function flowState() {
     if (!flow) return null;
@@ -484,13 +650,17 @@ export function createRuntime({
       selection: [...flow.selection],
       preview: flow.preview,
       message: flow.message,
+      draft: flow.draft ?? "",
+      // The provider/model resolved by the preview preflight. It is what the
+      // review names and what the generator is called with.
+      generator: flow.generator ?? null,
       push: flow.push,
       pushReady: Boolean(flow.pushToken),
     };
   }
 
   function flowChanged() {
-    for (const listener of [...flowListeners]) {
+    for (const listener of Array.from(flowListeners)) {
       try {
         listener();
       } catch {
@@ -513,6 +683,8 @@ export function createRuntime({
           if (generation === flowGeneration) cancelFlow();
         },
       );
+      // The mounted Git dialog replaces the log dialog; exit cleanup must not clear it.
+      if (typeof context.ui?.dialog?.show === "function") releaseOwnedLog();
       context.ui?.dialog?.set?.({ size: "large" });
     } catch {
       cancelFlow();
@@ -533,14 +705,10 @@ export function createRuntime({
     } catch {
       // best effort: nothing was generating
     }
-    for (const token of [current?.token, current?.pushToken]) {
-      if (!token) continue;
-      try {
-        current.actions?.discard?.({ token });
-      } catch {
-        // best effort: an unknown token means the service already dropped it
-      }
-    }
+    // A commit or push that already started keeps its token and, for a commit,
+    // its private index until the service answers. Its own settle path releases
+    // them; deleting here would pull the index out from under git.
+    if (!(current && mutationInFlight(current))) releaseClosedTokens(current);
     flowChanged();
   }
 
@@ -935,6 +1103,12 @@ export function createRuntime({
       preview: null,
       token: null,
       message: "",
+      // The committed message and the draft being edited are separate: cancel
+      // returns to the message, save replaces it, and a stale repaint can never
+      // overwrite typing because the typing lands here first.
+      draft: "",
+      // Resolved before the Generate action; never inferred from a failure later.
+      generator: null,
       push: null,
       pushToken: null,
     };
@@ -1003,8 +1177,31 @@ export function createRuntime({
     current.error = null;
     current.notice = "";
     flowChanged();
-    const result = await current.actions.previewPush({ cwd: current.directory });
-    if (flow !== current) return null;
+    let result;
+    try {
+      result = await current.actions.previewPush({ cwd: current.directory });
+    } catch {
+      // A rejecting service must not leave the dialog stuck in "loading", and
+      // its thrown text may contain paths or URLs. The flow gets one safe
+      // diagnostic and no token exists to clean up.
+      if (flow !== current) return null;
+      current.busy = "";
+      notify(context, "Push: the push could not be prepared", "error");
+      closeFlow();
+      return { ok: false, error: { code: "push-preview-failed", message: "the push could not be prepared" } };
+    }
+    if (flow !== current) {
+      // The flow was cancelled while git was resolving the target. Its token is
+      // visible to no one, so discard it now instead of leaking the preview.
+      if (result?.token) {
+        try {
+          current.actions?.discard?.({ token: result.token });
+        } catch {
+          // best effort: an unknown token means the service already dropped it
+        }
+      }
+      return null;
+    }
     if (!result?.ok) {
       notify(context, `Push: ${result?.error?.message ?? "the push could not be prepared"}`, "error");
       closeFlow();
@@ -1042,11 +1239,40 @@ export function createRuntime({
   async function runPush() {
     const current = flow;
     if (!current || current.step !== "push-confirm" || !current.pushToken || current.busy) return null;
-    current.busy = "pushing";
+    current.busy = PUSH_BUSY;
     current.error = null;
     flowChanged();
-    const result = await current.actions.push({ token: current.pushToken, confirm: true });
-    if (flow !== current) return null;
+    let result;
+    try {
+      result = await current.actions.push({ token: current.pushToken, confirm: true });
+    } catch {
+      // The remote may have received the push before the service rejected the
+      // call. Give one safe diagnostic without the thrown text.
+      const failure = {
+        ok: false,
+        error: { code: "push-failed", message: "The push outcome is unknown; check the remote before retrying" },
+      };
+      if (flow !== current) {
+        notify(context, `Push: ${failure.error.message}`, "error");
+        releaseClosedTokens(current);
+        return failure;
+      }
+      current.busy = "";
+      current.error = failure.error;
+      flowChanged();
+      return failure;
+    }
+    if (flow !== current) {
+      // The dialog was closed while the push ran. The outcome still matters, so
+      // say it once without reopening or mutating the dead flow.
+      if (result?.ok) {
+        notify(context, `Pushed ${result.branch} to ${result.remote}/${result.remoteBranch}`, "info");
+      } else {
+        notify(context, `Push: ${result?.error?.message ?? "the push failed"}`, "error");
+      }
+      releaseClosedTokens(current);
+      return result;
+    }
     current.busy = "";
     if (!result?.ok) {
       current.error = result?.error ?? { code: "push-failed", message: "the push failed" };
@@ -1071,6 +1297,9 @@ export function createRuntime({
     }
     current.token = null;
     current.preview = null;
+    current.generator = null;
+    current.message = "";
+    current.draft = "";
   }
 
   function toggleFile(path) {
@@ -1157,11 +1386,40 @@ export function createRuntime({
     current.error = null;
     current.notice = "";
     flowChanged();
-    const result = await current.actions.preview({ cwd: current.directory, files });
-    if (flow !== current) return null;
+    let result;
+    try {
+      result = await current.actions.preview({ cwd: current.directory, files });
+    } catch {
+      // The service's own failure text can quote paths or the diff, so the view
+      // gets a safe generic diagnostic instead.
+      if (flow !== current) return null;
+      current.busy = "";
+      current.error = { code: "preview-failed", message: "The review could not be prepared" };
+      current.step = "files";
+      flowChanged();
+      return null;
+    }
+    if (flow !== current) {
+      // The flow was cancelled or replaced while git was freezing this review.
+      // Its token belongs to no visible review, so discard it now instead of
+      // leaking a private index until process exit.
+      if (result?.token) {
+        try {
+          current.actions?.discard?.({ token: result.token });
+        } catch {
+          // best effort: an unknown token means the service already dropped it
+        }
+      }
+      return null;
+    }
     current.busy = "";
     if (!result?.ok) {
       current.error = result?.error ?? { code: "preview-failed", message: "the preview failed" };
+      current.generator = null;
+      // Whatever review was replaced is gone, so its message must not survive
+      // into the next one.
+      current.message = "";
+      current.draft = "";
       current.step = "files";
       flowChanged();
       return result;
@@ -1175,6 +1433,9 @@ export function createRuntime({
       }
       current.token = null;
       current.preview = null;
+      current.generator = null;
+      current.message = "";
+      current.draft = "";
       current.step = "blocked";
       current.notice = result.diffUnavailable
         ? "git produced no patch for this selection, so nothing was reviewed or committed"
@@ -1182,90 +1443,170 @@ export function createRuntime({
       flowChanged();
       return result;
     }
+    if (current.token && current.token !== result.token) {
+      // A second review supersedes the first; discard its now-unreachable token here.
+      try {
+        current.actions.discard?.({ token: current.token });
+      } catch {
+        // best effort
+      }
+    }
     current.token = result.token;
     current.preview = result;
+    current.generator = null;
+    // A new review is a new diff. A message from an earlier review must never be
+    // paired with it, either in the editor or in the final commit.
+    current.message = "";
+    current.draft = "";
     current.step = "preview";
+    current.busy = "";
+    current.error = null;
     flowChanged();
+    // The review is ready, so resolve the exact destination now. This reads host
+    // metadata only: no diff is sent and no model is called until the user
+    // presses the one Generate message action. The review stays visible while
+    // the probe runs, and the action stays disabled until it answers.
+    await preflightGenerator(current, result.token);
+    if (flow !== current) return null;
     return result;
   }
 
-  function askEgress() {
-    const current = flow;
-    if (!current || current.step !== "preview" || !current.token) return false;
-    current.step = "egress";
+  // Resolve the exact provider and model before the Generate action is enabled.
+  // The probe makes no model call and sends no diff: it only reads host metadata,
+  // so the preview can name the real destination instead of assuming OpenCodex.
+  // A cancelled flow, or a preview that was replaced while the probe ran, never
+  // receives the answer: the token is the identity of the reviewed diff.
+  async function preflightGenerator(current, token) {
+    current.busy = "checking the Luna generator";
+    current.generator = null;
+    current.error = null;
+    flowChanged();
+    const selected = await probeCommitGenerator();
+    if (flow !== current || current.token !== token || current.step !== "preview") return false;
+    current.busy = "";
+    if (!selected?.ok) {
+      current.error = selected?.error ?? {
+        code: "generator-probe-failed",
+        message: "The Luna generator could not be checked.",
+      };
+      flowChanged();
+      return false;
+    }
+    current.generator = selected.generator;
     current.error = null;
     flowChanged();
     return true;
   }
 
   // The only egress: the reviewed diff goes to the native Luna text API to write
-  // a message. It runs only after the egress step was shown and approved, and the
-  // step guard is what keeps that true: the API cannot generate from the review.
+  // a message. The preview shows the complete disclosure inline, and this action
+  // is the approval: it runs only with the already-resolved generator and sends
+  // only the frozen diff. The model is the one the probe named; a failure is
+  // reported, never retried against another provider.
   async function runGenerate() {
     const current = flow;
-    if (!current || current.step !== "egress" || !current.token || current.busy) return null;
+    if (!current || current.step !== "preview" || !current.token || current.busy) return null;
+    // The button is disabled without a resolved generator, and the preflight error
+    // already explains why. A programmatic press is a no-op, never a fallback.
+    if (!current.generator) return null;
+    const { providerID, id, variant } = current.generator;
+    const model = { providerID, id, ...(variant ? { variant } : {}) };
     current.busy = "generating with Luna";
     current.error = null;
     flowChanged();
-    const result = await current.actions.generateMessage({
-      token: current.token,
-      approveEgress: true,
-    });
+    let result;
+    try {
+      result = await current.actions.generateMessage({
+        token: current.token,
+        approveEgress: true,
+        model,
+      });
+    } catch {
+      // A thrown provider error can contain the diff or provider internals. The
+      // review only ever sees this safe, generic diagnostic.
+      if (flow !== current) return null;
+      current.busy = "";
+      current.error = { code: "generation-failed", message: "Luna message generation failed" };
+      flowChanged();
+      return null;
+    }
     if (flow !== current) return null;
     current.busy = "";
     if (!result?.ok) {
       current.error = result?.error ?? { code: "generate-failed", message: "no message was generated" };
-      current.step = "preview";
       flowChanged();
       return result;
     }
     current.message = result.message;
     flowChanged();
-    return promptMessage();
+    return editMessageStep();
   }
 
-  async function promptMessage() {
+  // The draft is edited inside this dialog, never in a host prompt. The host's
+  // prompt renderable is a single line that wraps nothing, so a subject, a blank
+  // line and a body could not survive it. Opening the editor is a step of this
+  // flow: the dialog stays mounted, the draft stays here, and nothing commits.
+  function editMessageStep() {
     const current = flow;
-    if (!current || !current.token) return null;
-    // The host prompt replaces this dialog, so the flow state lives here: the
-    // dialog is mounted again once the message comes back.
-    flowGeneration += 1;
-    let text;
-    try {
-      text = await context.ui?.dialog?.prompt?.({
-        title: "Commit message",
-        description: "Used as-is. Only the selected files are committed.",
-        // A plain descriptive subject: the prompt never teaches a Conventional
-        // Commit prefix, which the generator is told not to produce.
-        placeholder: "shorten the header spacing",
-        value: current.message,
-      });
-    } catch {
-      text = undefined;
-    }
-    if (flow !== current) return null;
-    if (typeof text === "string" && text.trim()) {
-      current.message = text.trim();
+    if (!current || !current.token || current.busy) return null;
+    // Only the review steps own a draft to edit. Any other caller is stale.
+    if (current.step !== "confirm" && current.step !== "preview") return null;
+    // The editor starts from the message as it stands. The draft then belongs to
+    // the field, so a repaint mid-edit can only show what has been typed.
+    current.draft = current.message;
+    current.step = "edit";
+    current.error = null;
+    current.notice = "";
+    flowChanged();
+    return current.message || null;
+  }
+
+  // Every keystroke lands here. It never notifies, so the field is not rebuilt
+  // while it is being typed in; the flow simply holds the newest text.
+  function draftChanged(value) {
+    const current = flow;
+    if (!current || current.step !== "edit") return false;
+    current.draft = typeof value === "string" ? value : "";
+    return true;
+  }
+
+  // Save the edited text. A blank field is a deliberate clear: nothing is
+  // committed and the flow returns to review. Passed text is saved as typed.
+  function saveMessage(text) {
+    const current = flow;
+    if (!current || current.step !== "edit") return null;
+    const typed = typeof text === "string" ? text : current.draft;
+    if (typed.trim()) {
+      // Only the outer whitespace goes. The blank line between the subject and
+      // the body is the draft's shape, so it is kept exactly as typed.
+      current.message = typed.trim();
+      current.draft = current.message;
       current.step = "confirm";
       current.error = null;
       current.notice = "";
-    } else if (typeof text === "string") {
-      // The user cleared the draft on purpose. Committing the message they just
-      // deleted would be wrong, so the draft goes and nothing is committed.
+    } else {
       current.message = "";
+      current.draft = "";
       current.step = "preview";
       current.error = null;
       current.notice = "The message was cleared, so nothing was committed";
-    } else if (!current.message) {
-      // Cancelled with no draft: the commit cannot go ahead.
+    }
+    flowChanged();
+    return current.message || null;
+  }
+
+  // Cancelling the editor keeps the draft the flow already had, and never
+  // commits. A cancel with no draft cannot commit, so it says so and goes back
+  // to the review instead of stopping on a step with nothing to confirm.
+  function cancelMessage() {
+    const current = flow;
+    if (!current || current.step !== "edit") return null;
+    if (current.message) {
+      current.step = "confirm";
+    } else {
       current.notice = "No message was set, so nothing was committed";
       current.step = "preview";
-    } else {
-      // Cancelled with an existing draft: keep it for editing. Cancelling a
-      // prompt never commits on its own.
-      current.step = "confirm";
     }
-    mountFlow();
     flowChanged();
     return current.message || null;
   }
@@ -1280,11 +1621,48 @@ export function createRuntime({
       notify(context, "A commit message is required", "warning");
       return null;
     }
-    current.busy = "committing the selected files";
+    current.busy = COMMIT_BUSY;
     current.error = null;
     flowChanged();
-    const result = await current.actions.commit({ token: current.token, message: current.message });
-    if (flow !== current) return null;
+    let result;
+    try {
+      result = await current.actions.commit({ token: current.token, message: current.message });
+    } catch {
+      // A rejecting service cannot tell us whether the commit landed. Never
+      // surface its thrown text, and never imply a retry is safe.
+      const failure = {
+        ok: false,
+        error: { code: "commit-failed", message: "The commit outcome is unknown; check the repository before retrying" },
+      };
+      if (flow !== current) {
+        notify(context, failure.error.message, "error");
+        releaseClosedTokens(current);
+        return failure;
+      }
+      current.busy = "";
+      current.error = failure.error;
+      flowChanged();
+      return failure;
+    }
+    if (flow !== current) {
+      // The dialog was closed while the commit ran. Report the settled outcome
+      // once, but never touch the closed flow or reopen it. The token is
+      // released only now, after git may still have been using its index.
+      if (result?.ok) {
+        const count = Array.isArray(result.files) ? result.files.length : 0;
+        const hash = typeof result.hash === "string" ? result.hash.slice(0, 12) : "";
+        notify(context, `Committed ${count} file${count === 1 ? "" : "s"}${hash ? ` · ${hash}` : ""}`, "info");
+      } else {
+        const error = result?.error ?? { code: "commit-failed", message: "the commit failed" };
+        notify(
+          context,
+          error.hash ? `Commit exists as ${error.hash} — do not retry` : `Commit: ${error.message}`,
+          "error",
+        );
+      }
+      releaseClosedTokens(current);
+      return result;
+    }
     current.busy = "";
     if (!result?.ok) {
       const error = result?.error ?? { code: "commit-failed", message: "the commit failed" };
@@ -1329,7 +1707,7 @@ export function createRuntime({
       flowChanged();
       return true;
     }
-    if (current.step === "egress" || current.step === "confirm") {
+    if (current.step === "confirm") {
       current.step = "preview";
       current.error = null;
       flowChanged();
@@ -1356,9 +1734,11 @@ export function createRuntime({
     cancel: () => closeFlow(),
     reload: () => loadSelection(),
     previewSelection: () => runPreview(),
-    askEgress,
     approveEgress: () => runGenerate(),
-    editMessage: () => promptMessage(),
+    editMessage: () => editMessageStep(),
+    draftChanged: (value) => draftChanged(value),
+    saveMessage: (text) => saveMessage(text),
+    cancelMessage: () => cancelMessage(),
     confirm: () => runCommit(),
     confirmPush: askPushConfirm,
     pushNow: () => runPush(),
@@ -1539,6 +1919,7 @@ export function createRuntime({
       } catch {
         // ignore: the dialog is open
       }
+      releaseOwnedLog();
       return true;
     }
     notify(context, unavailable, "warning");
@@ -1766,6 +2147,19 @@ export function createRuntime({
     // Detach the internal settings-error reporter. `visibility.dispose()` is
     // called separately by setup, which owns the store's lifetime.
     disposeSettings: () => unsubscribeSettingsError(),
+    // Close the log dialog only while this runtime still owns it. setup calls
+    // this before the runner manager so an open log never outlives its runs,
+    // and a Git/settings/foreign dialog that replaced it is left untouched.
+    disposeLogs: () => {
+      if (!ownedLog) return false;
+      ownedLog = undefined;
+      try {
+        context.ui?.dialog?.clear?.();
+      } catch {
+        // the host already dropped the dialog
+      }
+      return true;
+    },
   };
   return runtime;
 }
@@ -1951,11 +2345,16 @@ export async function setupWith(context, view, options = {}) {
   }
 
   // Children belong to this TUI process; do not leave them behind on exit.
-  const onExit = () => manager.stopAll();
+  // The host runs no timers after `exit`, so use the synchronous dispose path:
+  // `stopAll` only schedules an unref grace timer and would leave groups alive.
+  const onExit = () => manager.dispose();
   process.once("exit", onExit);
 
   return () => {
     process.removeListener("exit", onExit);
+    // An open log dialog reads runs; close it while the runs still exist, and
+    // only if this runtime still owns the dialog.
+    runtime.disposeLogs();
     runtime.disposeGit();
     runtime.disposeSettings();
     manager.dispose();

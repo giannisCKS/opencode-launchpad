@@ -294,6 +294,26 @@ function expectCell(entry, label, frame = "frame") {
   return found;
 }
 
+// A bordered control has to fit both axes of the render surface. Checking the
+// measured bounds catches a footer pushed below the last row even when the
+// frame still contains the label somewhere off screen.
+function expectInViewport(entry, label, frame = "frame") {
+  const found = expectCell(entry, label, frame);
+  assert.ok(
+    found.x >= 0 && found.y >= 0,
+    `${entry.name}: "${label}" starts at (${found.x}, ${found.y})\n${entry.frames[frame]}`,
+  );
+  assert.ok(
+    found.x + found.w <= entry.width,
+    `${entry.name}: "${label}" ends at column ${found.x + found.w} of ${entry.width}\n${entry.frames[frame]}`,
+  );
+  assert.ok(
+    found.y + found.h <= entry.height,
+    `${entry.name}: "${label}" ends at row ${found.y + found.h} of ${entry.height}\n${entry.frames[frame]}`,
+  );
+  return found;
+}
+
 function expectHidden(entry, label, frame = "frame") {
   assert.equal(cell(entry, label, frame), undefined, `${entry.name}: "${label}" still rendered`);
   const text = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -1187,9 +1207,9 @@ describe("sidebar layout from a real render", () => {
     expectCellsWellFormed(entry);
   });
 
-  test("the egress diff wraps instead of truncating a line past 200 columns", (t) => {
+  test("the preview diff wraps instead of truncating a line past 200 columns", (t) => {
     if (skipIfNoRenderer(t)) return;
-    const entry = measurement("git-egress-longline-36");
+    const entry = measurement("git-preview-longline-36");
     const tail = "END-OF-LONG-DIFF-LINE-9f3c";
     // Wrapping can split the marker across rows, and the scrollbar can sit at
     // the right edge, so compare without whitespace or scrollbar cells.
@@ -1212,5 +1232,606 @@ describe("sidebar layout from a real render", () => {
       `the diff after the long line is missing\n${after}`,
     );
     assert.doesNotMatch(entry.frames["before-scroll"], /…/);
+  });
+
+  test("the preview disclosure names the provider and model actually selected", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("git-preview-native-70");
+    const compact = entry.frames.frame.replace(/\s+/g, "");
+    assert.ok(
+      compact.includes("OpenAIusinggpt-6-luna"),
+      `the preview does not name the selected provider and model\n${entry.frames.frame}`,
+    );
+    assert.ok(
+      frameLine(entry.frames.frame, "Generate message").includes("Generate message"),
+      `the one Generate action is missing\n${entry.frames.frame}`,
+    );
+    assert.ok(
+      compact.includes("Writemessage"),
+      `the manual message action is missing\n${entry.frames.frame}`,
+    );
+    assert.equal(
+      compact.includes("assumeddefault"),
+      false,
+      `a verified provider must not be called assumed\n${entry.frames.frame}`,
+    );
+    assert.doesNotMatch(entry.frames.frame, /Send diff to/, "no second egress action remains");
+  });
+
+  test("a legacy host marks the fixed destination as assumed, not verified", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("git-preview-legacy-70");
+    const compact = entry.frames.frame.replace(/\s+/g, "");
+    assert.ok(
+      compact.includes("OpenCodexusinggpt-6-luna(low)"),
+      `the assumed default is not named exactly\n${entry.frames.frame}`,
+    );
+    assert.ok(
+      compact.includes("assumeddefault,notverified."),
+      `the review does not say the default is unverified\n${entry.frames.frame}`,
+    );
+    assert.ok(
+      compact.includes("Writemessage"),
+      `the manual message action is missing\n${entry.frames.frame}`,
+    );
+    assert.doesNotMatch(entry.frames.frame, /Send diff to/, "no second egress action remains");
+  });
+
+  // At a narrow width the disclosure paragraph wraps to many rows and the file
+  // line wraps too. The whole review body scrolls, so the disclosure keeps its
+  // own rows and every action stays inside the viewport at both ends.
+  test("a narrow preview scrolls the disclosure without moving its actions", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("git-preview-narrow-32");
+    const frame = entry.frames.frame;
+    const scrolled = entry.frames["after-scroll"];
+    const compact = frame.replace(/\s+/g, "");
+    const scrolledCompact = scrolled.replace(/\s+/g, "");
+    // The review opens on the disclosure, naming the exact destination first.
+    assert.ok(
+      frameLine(frame, "Sending this selected frozen").includes("Sending this selected frozen"),
+      `the disclosure does not start on screen\n${frame}`,
+    );
+    assert.ok(
+      frameLine(frame, "OpenCode Proxy").includes("OpenCode Proxy"),
+      `the provider name is missing\n${frame}`,
+    );
+    assert.ok(
+      frameLine(frame, "luna-large-preview").includes("luna-large-preview (high)"),
+      `the model and variant are missing\n${frame}`,
+    );
+    // At the bottom the last disclosure row sits above the first file row; they
+    // never share one.
+    const lastConsent = rowIndexOf(scrolled, "before the final");
+    const fileLine = rowIndexOf(scrolled, "Files in the diff:");
+    assert.ok(
+      lastConsent >= 0 && fileLine > lastConsent,
+      `the file line does not start below the disclosure\n${scrolled}`,
+    );
+    // Measured bounds agree with the frame: the paragraph ends before the file
+    // line begins, so no leftover words can overwrite it.
+    const paragraph = entry.nodes.find((node) => node.label.startsWith("Sending this selected frozen"));
+    const files = entry.nodes.find((node) => node.label.startsWith("Files in the diff:"));
+    assert.ok(paragraph && files, "the disclosure nodes are missing from the measurement");
+    assert.ok(
+      paragraph.y + paragraph.h <= files.y,
+      `the disclosure box (y=${paragraph.y}, h=${paragraph.h}) runs into the file line (y=${files.y})`,
+    );
+    // The diff is below the fold at the narrow height, so the scroll is what
+    // makes it reachable rather than a shorter body that happened to fit.
+    assert.equal(
+      compact.includes("Frozendiff"),
+      false,
+      `the diff starts on screen, so scrolling was not tested\n${frame}`,
+    );
+    // Below the fold, scrolling reaches the rest of the file list, the stat and
+    // the diff, while the disclosure tail remains in the same scroll body.
+    assert.ok(
+      scrolledCompact.includes("beforethefinalcommit."),
+      `the end of the disclosure is unreachable\n${scrolled}`,
+    );
+    assert.ok(
+      scrolledCompact.includes("src/features/checkout/use-checkout.ts"),
+      `the file list is cut off\n${scrolled}`,
+    );
+    assert.ok(
+      scrolledCompact.includes("2fileschanged"),
+      `the stat is unreachable\n${scrolled}`,
+    );
+    assert.ok(
+      scrolledCompact.includes("Frozendiff") && scrolledCompact.includes("+anotherline"),
+      `the diff tail is unreachable\n${scrolled}`,
+    );
+    assert.doesNotMatch(frame + scrolled, /…/, "a row was replaced by an ellipsis");
+    // Every preview action fits the viewport before and after the scroll, and
+    // none of them can sit on top of the review body.
+    const scrollTop = entry.nodesByFrame.frame.find((node) => node.ctor.includes("ScrollBox"));
+    const scrollBottom = entry.nodesByFrame["after-scroll"].find((node) => node.ctor.includes("ScrollBox"));
+    assert.ok(scrollTop && scrollBottom, "the review scroll box is missing from the measurement");
+    for (const label of ["Generate message", "Write message", "Back", "Cancel esc"]) {
+      const before = expectInViewport(entry, label, "frame");
+      const after = expectInViewport(entry, label, "after-scroll");
+      assert.equal(before.y, after.y, `${entry.name}: "${label}" moved with the scroll`);
+      assert.ok(
+        before.y >= scrollTop.y + scrollTop.h,
+        `${entry.name}: "${label}" overlaps the review body at row ${before.y}`,
+      );
+      assert.ok(
+        after.y >= scrollBottom.y + scrollBottom.h,
+        `${entry.name}: "${label}" overlaps the scrolled review body at row ${after.y}`,
+      );
+    }
+    assert.equal(compact.includes("Senddiffto"), false, "no second egress action remains");
+  });
+
+  test("the final confirmation scrolls the whole message and keeps Commit in reach", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("git-confirm-longmessage-70");
+    const before = entry.frames["before-scroll"];
+    // The review opens at the top: the subject and the first body row are the
+    // first things shown, not the tail the caret happened to leave behind.
+    assert.ok(
+      frameLine(before, "confirm the whole message is readable"),
+      `the subject is missing from the confirmation\n${before}`,
+    );
+    assert.ok(
+      frameLine(before, "CONFIRM-BODY-ROW-1:"),
+      `the body does not start on screen\n${before}`,
+    );
+    // The message is taller than the dialog, so its tail needs the scroll box.
+    assert.equal(
+      rowIndexOf(before, "CONFIRM-BODY-TAIL-5e8b"),
+      -1,
+      `the tail starts on screen, so scrolling was not tested\n${before}`,
+    );
+    // Commit belongs to the fixed controls, never to the scrolled message.
+    // "Edit message" identifies the footer: the title also says "Commit".
+    const beforeFooter = frameLine(before, "Edit message");
+    assert.ok(beforeFooter.includes("Commit"), `Commit left the screen below the long message\n${before}`);
+    const after = entry.frames["after-scroll"];
+    assert.ok(
+      frameLine(after, "CONFIRM-BODY-TAIL-5e8b"),
+      `the end of the message is unreachable\n${after}`,
+    );
+    const afterFooter = frameLine(after, "Edit message");
+    assert.ok(
+      afterFooter.includes("Commit"),
+      `Commit left the screen while the message scrolled\n${after}`,
+    );
+    assert.doesNotMatch(after, /…/, `a row was replaced by an ellipsis\n${after}`);
+  });
+
+  test("the message editor shows the whole multi-line message", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("git-edit-multiline-70");
+    const frame = entry.frames.frame;
+    // The subject, the blank line and the body all live in one field now. A
+    // one-line prompt could only ever have shown the subject.
+    const subject = frameLine(frame, "add the header spacing");
+    const bodyRow = frameLine(frame, "Body explains why the spacing");
+    assert.ok(subject.includes("add the header spacing"), `the subject is missing\n${frame}`);
+    assert.ok(bodyRow.includes("Body explains why the spacing"), `the body is missing\n${frame}`);
+    assert.ok(
+      frame.indexOf(subject) < frame.indexOf(bodyRow),
+      `the body is not below the subject\n${frame}`,
+    );
+    // The long body wraps instead of cutting off, and the field does not fall
+    // back to a display-time ellipsis.
+    assert.ok(
+      frame.replace(/[│█]/g, "").replace(/\s+/g, "").includes("beforeitchangedatall."),
+      `the wrapped tail of the body is missing\n${frame}`,
+    );
+    // Cancel throws away the edit; only the old saved message survives. Escape
+    // is the host key that closes the flow, so both are named truthfully.
+    const hint = frame.replace(/\s+/g, "");
+    assert.ok(hint.includes("Canceldiscardschanges"), `Cancel is described wrongly\n${frame}`);
+    assert.equal(hint.includes("Cancelkeepsthedraft"), false, `the old Cancel hint remains\n${frame}`);
+    assert.ok(hint.includes("Escclosestheflow"), `Escape is not explained\n${frame}`);
+    assert.doesNotMatch(frame, /…/);
+  });
+
+  test("the editor keeps a typed newline and saves only on an explicit save", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("git-edit-typing-70");
+    // The new line is on screen: Return inserted it instead of saving.
+    assert.ok(
+      frameLine(entry.frames["after-typing"], "second line of the body"),
+      `the typed line is not on screen\n${entry.frames["after-typing"]}`,
+    );
+    const saves = entry.calls.filter(([name]) => name === "saveMessage");
+    assert.equal(
+      saves.length,
+      1,
+      `a plain Return must not save, and the explicit save must: ${JSON.stringify(entry.calls)}`,
+    );
+    assert.match(saves[0][1], /second line of the body/, "the typed line never reached the flow");
+    // The message survives navigation: the editor opens at the subject, End
+    // reaches the tail where the typing continues.
+    assert.ok(
+      saves[0][1].startsWith("add the header spacing"),
+      `the editor did not keep the subject first: ${JSON.stringify(saves[0][1])}`,
+    );
+    assert.equal(saves[0][1].includes("\n"), true, "the newline was lost on the way to the flow");
+    assert.ok(
+      entry.calls.some(([name]) => name === "draftChanged"),
+      "the field never reported what was typed",
+    );
+    assert.equal(
+      entry.calls.some(([name]) => name === "confirm"),
+      false,
+      "saving the message committed by itself",
+    );
+  });
+
+  test("the editor's save button hands the message to the flow", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("git-edit-save-button-70");
+    assert.deepEqual(
+      entry.calls.filter(([name]) => name === "saveMessage").map(([, value]) => value),
+      ["add the header spacing\n\nBody explains why."],
+      `calls: ${JSON.stringify(entry.calls)}`,
+    );
+    assert.equal(
+      entry.calls.some(([name]) => name === "confirm"),
+      false,
+      "the save button committed by itself",
+    );
+  });
+
+  test("the editor's cancel keeps the message the flow already had", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("git-edit-cancel-70");
+    assert.equal(
+      entry.calls.some(([name]) => name === "saveMessage"),
+      false,
+      `cancel saved the typing: ${JSON.stringify(entry.calls)}`,
+    );
+    assert.ok(
+      entry.calls.some(([name]) => name === "cancelMessage"),
+      `cancel never reached the flow: ${JSON.stringify(entry.calls)}`,
+    );
+    assert.equal(
+      entry.calls.some(([name]) => name === "confirm"),
+      false,
+      "cancelling the editor committed by itself",
+    );
+    assert.ok(
+      frameLine(entry.frames["after-cancel"], "Body explains why.").includes("Body explains why."),
+      `the message left the screen on cancel\n${entry.frames["after-cancel"]}`,
+    );
+  });
+
+  test("a message longer than the field scrolls it instead of growing it", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("git-edit-overflow-70");
+    const fieldRows = (frameName) => {
+      const node = (entry.nodesByFrame[frameName] ?? []).find((each) =>
+        each.ctor.includes("Textarea"),
+      );
+      return node?.h;
+    };
+    // The field takes the body rather than a fixed six rows, and its viewport
+    // does not grow while typing: the text inside scrolls instead.
+    const startRows = fieldRows("frame");
+    assert.ok(
+      startRows >= 8 && startRows < 20,
+      `the field did not take the available body\n${entry.frames.frame}`,
+    );
+    assert.ok(
+      fieldRows("after-typing") <= startRows + 1,
+      `typing grew the field instead of scrolling it\n${entry.frames["after-typing"]}`,
+    );
+    // Saving opens the review, which has no editor field at all.
+    assert.equal(fieldRows("after-save"), undefined, "the editor survived the save");
+
+    // The field opens at the start, so the subject is the first row reviewed.
+    // End moves the caret and the viewport to the tail; the message itself is
+    // never cut, and the rows between the two are reachable by scrolling.
+    assert.ok(
+      frameLine(entry.frames.frame, "add the header spacing"),
+      `the subject is not on screen\n${entry.frames.frame}`,
+    );
+    assert.equal(
+      rowIndexOf(entry.frames.frame, "OVERFLOW-BODY-END-7c1a"),
+      -1,
+      `the field did not open at the start\n${entry.frames.frame}`,
+    );
+    assert.ok(
+      frameLine(entry.frames["after-end"], "OVERFLOW-BODY-END-7c1a"),
+      `End did not reach the tail of the message\n${entry.frames["after-end"]}`,
+    );
+    // The row typed under the caret is visible, and no row is cut to an ellipsis.
+    assert.ok(
+      frameLine(entry.frames["after-typing"], "OVERFLOW-TYPED-TAIL-4b2d"),
+      `the typed tail is not on screen\n${entry.frames["after-typing"]}`,
+    );
+    assert.doesNotMatch(
+      entry.frames["after-typing"],
+      /…/,
+      `a row was replaced by an ellipsis\n${entry.frames["after-typing"]}`,
+    );
+    // The controls stay where they were, below the field.
+    const controls = entry.frames["after-typing"]
+      .replace(/[┌┐└┘─│█]/g, " ")
+      .replace(/\s+/g, " ");
+    assert.ok(
+      controls.includes("Save message"),
+      `the save control left the screen\n${entry.frames["after-typing"]}`,
+    );
+
+    // Saving hands over the whole message, not just the rows on screen.
+    const saves = entry.calls.filter(([name]) => name === "saveMessage");
+    assert.equal(saves.length, 1, `the save key never reached the flow: ${JSON.stringify(entry.calls)}`);
+    const saved = saves[0][1];
+    assert.ok(saved.startsWith("add the header spacing\n\nOVERFLOW-BODY-START"), saved);
+    assert.ok(saved.includes("OVERFLOW-BODY-END-7c1a"), "the hidden rows were lost");
+    assert.ok(saved.endsWith("\nOVERFLOW-TYPED-TAIL-4b2d"), "the typed tail was lost");
+    // subject, blank line, eight body rows, typed row.
+    assert.equal(saved.split("\n").length, 11, `the message changed shape: ${JSON.stringify(saved)}`);
+    assert.ok(saved.length > 600, `the body was shortened: ${JSON.stringify(saved)}`);
+  });
+
+  // The reported screenshots run near 100x30, 70x22 and 32 columns. The message
+  // is over 1000 characters, so a fixed six-row field cannot show it and the
+  // frozen diff is not allowed to compete for the body.
+  test("the long editor gives the message the body and keeps both ends reachable", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const sizes = [
+      ["git-edit-long-100x30", 30, 8],
+      ["git-edit-long-70x22", 22, 6],
+      ["git-edit-long-32x26", 26, 4],
+    ];
+    for (const [name, height, minimum] of sizes) {
+      const entry = measurement(name);
+      const field = (frame) =>
+        (entry.nodesByFrame[frame] ?? []).find((node) => node.ctor.includes("Textarea"));
+      const frame = entry.frames.frame;
+      const compact = frame.replace(/\s+/g, "");
+      // The field owns the available body instead of a fixed six rows, and it
+      // does not grow when the caret moves: only its viewport scrolls.
+      const start = field("frame");
+      assert.ok(start, `${name}: the message field is missing\n${frame}`);
+      assert.ok(
+        start.h >= minimum,
+        `${name}: the field kept only ${start.h} rows instead of using the body\n${frame}`,
+      );
+      assert.ok(start.h < height, `${name}: the field is taller than the dialog\n${frame}`);
+      assert.equal(field("after-end")?.h, start.h, `${name}: End resized the field`);
+      assert.equal(field("after-home")?.h, start.h, `${name}: Home resized the field`);
+
+      // The edit screen explains movement, names the caret row, and carries no
+      // frozen diff: that was already reviewed on the previous screen.
+      assert.ok(compact.includes("Message·line1of9"), `${name}: the line counter is missing\n${frame}`);
+      assert.ok(compact.includes("Arrowsscroll"), `${name}: scrolling is not explained\n${frame}`);
+      assert.ok(compact.includes("Endshowsthetail"), `${name}: End is not explained\n${frame}`);
+      assert.ok(compact.includes("Homereturnstothetop"), `${name}: Home is not explained\n${frame}`);
+      assert.ok(compact.includes("Enteraddsaline"), `${name}: typing is not explained\n${frame}`);
+      assert.ok(compact.includes("Alt+Entersaves"), `${name}: saving is not explained\n${frame}`);
+      assert.equal(rowIndexOf(frame, "Frozen diff"), -1, `${name}: the diff still owns edit space\n${frame}`);
+      assert.equal(rowIndexOf(frame, "DIFF-ROW-01"), -1, `${name}: diff rows still own edit space\n${frame}`);
+
+      // At rest: the subject is visible, the tail is hidden below, and the
+      // controls stay in the fixed footer.
+      assert.ok(
+        frameLine(frame, "Resolve and disclose"),
+        `${name}: the subject is missing\n${frame}`,
+      );
+      assert.equal(
+        rowIndexOf(frame, "LONG-MESSAGE-TAIL-9a4c"),
+        -1,
+        `${name}: the tail is visible before any movement\n${frame}`,
+      );
+      assert.ok(
+        frameLine(frame, "Save message").includes("Save message"),
+        `${name}: Save message left the screen\n${frame}`,
+      );
+      assert.ok(
+        frameLine(frame, "Cancel").includes("Cancel"),
+        `${name}: Cancel left the screen\n${frame}`,
+      );
+
+      // End reaches the exact tail and the counter names the last logical row;
+      // Home restores the subject. No row is replaced by an ellipsis.
+      const end = entry.frames["after-end"];
+      assert.ok(
+        frameLine(end, "LONG-MESSAGE-TAIL-9a4c"),
+        `${name}: End did not reach the message tail\n${end}`,
+      );
+      assert.ok(
+        end.replace(/\s+/g, "").includes("Message·line9of9"),
+        `${name}: the counter did not follow the caret to the tail\n${end}`,
+      );
+      assert.doesNotMatch(end, /…/, `${name}: a row was replaced by an ellipsis\n${end}`);
+      const home = entry.frames["after-home"];
+      assert.ok(
+        frameLine(home, "Resolve and disclose"),
+        `${name}: Home did not return to the subject\n${home}`,
+      );
+      assert.equal(
+        rowIndexOf(home, "LONG-MESSAGE-TAIL-9a4c"),
+        -1,
+        `${name}: Home did not return to the top\n${home}`,
+      );
+
+      // Saving hands over the entire original text, byte for byte, and lands on
+      // the review rather than committing. The saved review still scrolls to
+      // the marked tail while Commit stays in the footer.
+      const saves = entry.calls.filter(([call]) => call === "saveMessage");
+      assert.equal(saves.length, 1, `${name}: the save key never reached the flow`);
+      assert.equal(
+        entry.git.message,
+        entry.gitBefore.message,
+        `${name}: the saved message differs from the original`,
+      );
+      assert.ok(entry.gitBefore.message.length > 1000, `${name}: the fixture is too short`);
+      assert.equal(entry.gitBefore.message.split("\n").length, 9, `${name}: the fixture changed shape`);
+      assert.equal(entry.git.step, "confirm", `${name}: saving did not open the review`);
+      assert.equal(
+        entry.calls.some(([call]) => call === "confirm"),
+        false,
+        `${name}: saving committed by itself`,
+      );
+      const review = entry.frames["after-save"];
+      assert.ok(
+        frameLine(review, "Edit message").includes("Commit"),
+        `${name}: Commit left the saved review\n${review}`,
+      );
+      const reviewEnd = entry.frames["after-save-end"];
+      assert.ok(
+        frameLine(reviewEnd, "LONG-MESSAGE-TAIL-9a4c"),
+        `${name}: the saved review cannot reach the tail\n${reviewEnd}`,
+      );
+      assert.ok(
+        frameLine(reviewEnd, "— end of message —").includes("— end of message —"),
+        `${name}: the saved review does not mark the message end\n${reviewEnd}`,
+      );
+      assert.ok(
+        frameLine(reviewEnd, "Frozen diff").includes("Frozen diff"),
+        `${name}: the saved review does not name the frozen diff\n${reviewEnd}`,
+      );
+      assert.ok(
+        frameLine(reviewEnd, "Edit message").includes("Commit"),
+        `${name}: Commit left the saved review while scrolling\n${reviewEnd}`,
+      );
+    }
+  });
+
+  test("the long confirmation states how to scroll and separates message from diff", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const sizes = ["git-confirm-long-100x30", "git-confirm-long-70x22", "git-confirm-long-32x26"];
+    for (const name of sizes) {
+      const entry = measurement(name);
+      const before = entry.frames["before-scroll"];
+      const compact = before.replace(/\s+/g, "");
+      // The scroll affordance is fixed above the viewport, so it cannot scroll
+      // away and is visible at the top of the review.
+      assert.ok(compact.includes("Scroll:mousewheelorPgUp/PgDn"), `${name}: the scroll hint is missing\n${before}`);
+      assert.ok(compact.includes("Endjumpstotheend"), `${name}: End is not explained\n${before}`);
+      assert.ok(compact.includes("Homereturnstothetop"), `${name}: Home is not explained\n${before}`);
+      assert.ok(
+        frameLine(before, "Resolve and disclose"),
+        `${name}: the subject is missing\n${before}`,
+      );
+      assert.equal(
+        rowIndexOf(before, "LONG-MESSAGE-TAIL-9a4c"),
+        -1,
+        `${name}: the tail starts on screen, so scrolling was not tested\n${before}`,
+      );
+      // The footer wraps instead of running off the right edge, so every
+      // control is readable even at 32 columns.
+      for (const label of ["Commit", "Edit message", "Back", "Cancel esc"]) {
+        assert.ok(
+          frameLine(before, label).includes(label),
+          `${name}: the footer lost "${label}" below the long message\n${before}`,
+        );
+      }
+
+      // End shows the tail, the explicit end marker, and the Frozen diff label
+      // together: the message end cannot be mistaken for the diff.
+      const end = entry.frames["after-end"];
+      assert.ok(
+        frameLine(end, "LONG-MESSAGE-TAIL-9a4c"),
+        `${name}: End did not reach the tail\n${end}`,
+      );
+      assert.ok(
+        frameLine(end, "— end of message —").includes("— end of message —"),
+        `${name}: the message end is not marked\n${end}`,
+      );
+      assert.ok(
+        frameLine(end, "Frozen diff").includes("Frozen diff"),
+        `${name}: the diff is not labelled after the message\n${end}`,
+      );
+      assert.ok(
+        frameLine(end, "Edit message").includes("Commit"),
+        `${name}: Commit left the screen at the tail\n${end}`,
+      );
+
+      // Home returns to the subject, and a wheel scroll still reaches the diff
+      // tail with the footer intact.
+      const home = entry.frames["after-home"];
+      assert.ok(
+        frameLine(home, "Resolve and disclose"),
+        `${name}: Home did not return to the subject\n${home}`,
+      );
+      assert.equal(
+        rowIndexOf(home, "LONG-MESSAGE-TAIL-9a4c"),
+        -1,
+        `${name}: Home did not return to the top\n${home}`,
+      );
+      const after = entry.frames["after-scroll"];
+      assert.ok(
+        frameLine(after, "DIFF-TAIL-4f2e"),
+        `${name}: the frozen diff tail is unreachable\n${after}`,
+      );
+      assert.ok(
+        frameLine(after, "Edit message").includes("Commit"),
+        `${name}: Commit left the screen while scrolling\n${after}`,
+      );
+      assert.doesNotMatch(after, /…/, `${name}: a row was replaced by an ellipsis\n${after}`);
+      assert.ok(entry.gitBefore.message.length > 1000, `${name}: the fixture is too short`);
+    }
+  });
+
+  test("the log dialog keeps a finished run's output and states a missing run truthfully", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("log-dialog-lifecycle-70");
+    const flat = (frame) => frame.replace(/\s+/g, "");
+    const controls = ["Stop s", "Reload r", "Restart R", "Close esc"];
+
+    // A live run draws its label, command, directory, elapsed status, progress
+    // and retained output, with every control in the viewport.
+    const running = entry.frames.running;
+    for (const text of ["Build mobile", "npm run build", "/workspace/demo"]) {
+      assert.ok(frameLine(running, text).includes(text), `the live run is missing "${text}"\n${running}`);
+    }
+    assert.ok(flat(running).includes("running4s·3lines"), `the live status is wrong\n${running}`);
+    assert.ok(flat(running).includes("building2/3"), `the progress line is missing\n${running}`);
+    for (const line of ["compiling src/app.js", "BUILD-TAIL-4d1e"]) {
+      assert.ok(running.includes(line), `the live output is missing "${line}"\n${running}`);
+    }
+    for (const label of controls) expectInViewport(entry, label, "running");
+
+    // The terminal snapshot keeps the same output. The status changes to
+    // finished, and the controls stay in the footer instead of vanishing.
+    const terminal = entry.frames.terminal;
+    assert.ok(
+      flat(terminal).includes("finishedin5s·3lines"),
+      `the retained terminal status is wrong\n${terminal}`,
+    );
+    assert.ok(terminal.includes("BUILD-TAIL-4d1e"), `the terminal output was dropped\n${terminal}`);
+    for (const label of controls) expectInViewport(entry, label, "terminal");
+
+    // No snapshot and no manager event: the timer redraws. The fallback must say
+    // only that tracking stopped; it must not claim the process exited or that
+    // the dialog cleared a finished run.
+    const missing = entry.frames.missing;
+    assert.ok(
+      frameLine(missing, "Runner is no longer tracked.").includes("Runner is no longer tracked."),
+      `the missing-run fallback is wrong\n${missing}`,
+    );
+    assert.doesNotMatch(
+      missing,
+      /Run finished and was cleared/,
+      `the old exit claim is still drawn\n${missing}`,
+    );
+    assert.doesNotMatch(
+      flat(missing),
+      /finishedin|stoppedafter|failedafter/,
+      `the fallback assumes the runner stopped\n${missing}`,
+    );
+    assert.ok(!missing.includes("BUILD-TAIL-4d1e"), `stale output survived the missing snapshot\n${missing}`);
+    for (const label of ["Stop s", "Reload r", "Restart R"]) expectHidden(entry, label, "missing");
+    expectInViewport(entry, "Close esc", "missing");
+  });
+
+  test("the log dialog reports its unmount to an optional onClose", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    const entry = measurement("log-dialog-lifecycle-70");
+    assert.equal(entry.logClosed, true, "unmount did not call onClose");
+    assert.deepEqual(
+      entry.calls.filter(([name]) => name === "dialog.close"),
+      [["dialog.close"]],
+      `onClose must notify once: ${JSON.stringify(entry.calls)}`,
+    );
   });
 });

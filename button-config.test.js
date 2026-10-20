@@ -331,6 +331,46 @@ test("subscribe reports a change, a failure, and detaches cleanly", () => {
   assert.equal(seen.length, 2, "a detached listener hears nothing");
 });
 
+test("a listener removed or added during notify does not change the current delivery", () => {
+  const store = createButtonConfigStore({ file: path.join(tempDir(), "buttons.json") });
+  const deliveries = [];
+  store.subscribe(() => deliveries.push([]));
+  let added = false;
+  const late = () => deliveries.at(-1).push("late");
+  let removeSecond;
+  const remove = store.subscribe(() => {
+    deliveries.at(-1).push("first");
+    remove();
+    removeSecond();
+    if (!added) {
+      added = true;
+      store.subscribe(late);
+    }
+  });
+  removeSecond = store.subscribe(() => deliveries.at(-1).push("second"));
+
+  store.saveOverride("/tmp/a", "build-mobile", { label: "x", command: "y", args: [] });
+  assert.deepEqual(
+    deliveries,
+    [["first", "second"], ["late"]],
+    "the first notification keeps the removed listener and excludes the added one; the save's later notification sees the new set",
+  );
+
+  store.saveOverride("/tmp/a", "web-live", { label: "x", command: "y", args: [] });
+  assert.deepEqual(
+    deliveries.slice(2),
+    [["late"], ["late"]],
+    "later changes reach the listener added during the first notification",
+  );
+});
+
+test("a non-function subscriber still gets a callable disposer", () => {
+  const store = createButtonConfigStore({ file: path.join(tempDir(), "buttons.json") });
+  const off = store.subscribe(null);
+  assert.equal(typeof off, "function", "callers never need to check the disposer");
+  assert.doesNotThrow(() => off());
+});
+
 test("the fallback file lives under XDG_CONFIG_HOME", () => {
   assert.equal(
     defaultButtonConfigFile({ XDG_CONFIG_HOME: "/tmp/xdg", HOME: "/home/someone" }),

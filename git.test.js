@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -19,7 +19,9 @@ import {
   gitignorePatternFor,
   parseStatusPorcelain,
   redact,
+  redactUrl,
   sanitizeMessage,
+  selectCommitGenerator,
   writeAllSync,
 } from "./git.js";
 
@@ -87,6 +89,19 @@ function baseline(repo) {
 
 function newActions(extra = {}) {
   return createGitActions({ tmpRoot: BASE, ...extra });
+}
+
+function shellArg(value) {
+  return `'${String(value).replaceAll("'", `'\\''`)}'`;
+}
+
+function writeHook(file, body) {
+  writeFileSync(file, `#!/bin/sh\n${body}\n`);
+  chmodSync(file, 0o755);
+}
+
+function failingCall(stderr = "failed") {
+  return { ok: false, code: 128, spawnError: null, timedOut: false, stdout: "", stderr };
 }
 
 // ------------------------------------------------------- add to .gitignore
@@ -397,6 +412,27 @@ test("redact removes credentials from git output", () => {
   assert.match(redact("Authorization: Bearer abc123"), /Authorization: \[redacted\]/);
 });
 
+test("redactUrl strips credentials from every URL shape, and leaves plain paths alone", () => {
+  assert.equal(redactUrl("https://user:tok@github.com/x.git"), "https://github.com/x.git");
+  assert.equal(redactUrl("ssh://alice:hunter2@example.invalid/repo.git"), "ssh://example.invalid/repo.git");
+  assert.equal(redactUrl("https://alice:p@ss@example.invalid/repo.git"), "https://example.invalid/repo.git");
+  assert.equal(redactUrl("alice:hunter2@example.invalid:repo.git"), "example.invalid:repo.git");
+  assert.equal(redactUrl("alice:p@ss@example.invalid:repo.git"), "example.invalid:repo.git");
+  assert.equal(redactUrl("git@github.com:acme/repo.git"), "git@github.com:acme/repo.git");
+  assert.equal(redactUrl("/tmp/opencode/bare.git"), "/tmp/opencode/bare.git");
+  assert.equal(redactUrl(""), "");
+});
+
+test("redact removes scp-like credential pairs from git stderr", () => {
+  const text = "fatal: could not read from alice:hunter2@example.invalid:repo.git";
+  const clean = redact(text);
+  assert.equal(clean.includes("hunter2"), false);
+  assert.match(clean, /example\.invalid:repo\.git/);
+  const atInPassword = redact("fatal: https://alice:p@ss@example.invalid/repo.git and bob:p@ss@example.invalid:repo.git");
+  assert.equal(atInPassword.includes("p@ss"), false);
+  assert.match(atInPassword, /fatal: https:\/\/example\.invalid\/repo\.git and example\.invalid:repo\.git/);
+});
+
 test("sanitizeMessage strips fences and bullets, and refuses empty output", () => {
   assert.equal(sanitizeMessage("```\nfeat(x): add thing\n```"), "feat(x): add thing");
   assert.equal(sanitizeMessage("- one\n- two"), "one\ntwo");
@@ -425,6 +461,9 @@ test("buildGeneratePrompt quotes only the frozen diff and marks it untrusted", (
   assert.match(prompt, /untrusted/i);
   // Plain English subject, never a Conventional Commit prefix.
   assert.match(prompt, /Do not use Conventional Commit prefixes/);
+  assert.match(prompt, /a blank line, then a detailed body/);
+  assert.match(prompt, /Describe each significant change/);
+  assert.match(prompt, /Do not invent motivations, test results, or behavior/);
 });
 
 // ------------------------------------------------------------- status/candidates
@@ -668,6 +707,110 @@ test("discard drops the review and leaves the repo untouched", async () => {
   assert.equal(repo.git("diff", "--cached", "--name-only").trim(), "");
   assert.match(repo.git("status", "--porcelain", "--", "a.txt"), /^ M a\.txt\n$/);
   actions.dispose();
+});
+
+// ------------------------------------------------- generator selection
+
+const proxyProvider = { id: "opencodex", name: "OpenCodex", activation: "enabled" };
+const nativeProvider = { id: "openai", name: "OpenAI", activation: "enabled" };
+
+function advertisedModel(providerID, id, { name = "Luna", enabled = true, variants = [] } = {}) {
+  return { id, modelID: id, providerID, name, enabled, variants: variants.map((variant) => ({ id: variant })) };
+}
+
+test("generator selection prefers an available OpenCodex Luna model", () => {
+  const selected = selectCommitGenerator({
+    providers: [proxyProvider, nativeProvider],
+    models: [
+      advertisedModel("opencodex", "gpt-6-luna", { variants: ["low"] }),
+      advertisedModel("openai", "gpt-6-luna"),
+    ],
+  });
+  assert.deepEqual(selected, {
+    ok: true,
+    generator: {
+      source: "opencodex",
+      providerID: "opencodex",
+      id: "gpt-6-luna",
+      variant: "low",
+      providerName: "OpenCodex",
+      modelName: "Luna",
+    },
+  });
+});
+
+test("generator selection falls back only to a Luna model OpenAI advertises", () => {
+  const selected = selectCommitGenerator({
+    providers: [nativeProvider],
+    models: [
+      advertisedModel("openai", "gpt-5", { name: "GPT-5" }),
+      advertisedModel("openai", "gpt-6-luna"),
+    ],
+  });
+  assert.deepEqual(selected, {
+    ok: true,
+    generator: {
+      source: "openai",
+      providerID: "openai",
+      id: "gpt-6-luna",
+      providerName: "OpenAI",
+      modelName: "Luna",
+    },
+  });
+});
+
+test("generator selection does not guess a native Luna id or variant", () => {
+  const noLuna = selectCommitGenerator({
+    providers: [nativeProvider],
+    models: [advertisedModel("openai", "gpt-5", { name: "GPT-5" })],
+  });
+  assert.equal(noLuna.ok, false);
+  assert.equal(noLuna.error.code, "model-unavailable");
+  assert.match(noLuna.error.message, /Luna/);
+
+  const ambiguous = selectCommitGenerator({
+    providers: [nativeProvider],
+    models: [
+      advertisedModel("openai", "openai-luna-a", { name: "Luna A" }),
+      advertisedModel("openai", "openai-luna-b", { name: "Luna B" }),
+    ],
+  });
+  assert.equal(ambiguous.ok, false);
+  assert.equal(ambiguous.error.code, "model-ambiguous");
+
+  // A variant is never guessed: native OpenAI gets no proxy "low" and no
+  // arbitrary pick from its own variants unless a future contract names one.
+  const advertisedVariant = selectCommitGenerator({
+    providers: [nativeProvider],
+    models: [advertisedModel("openai", "gpt-6-luna", { variants: ["high"] })],
+  });
+  assert.equal(advertisedVariant.ok, true);
+  assert.equal(advertisedVariant.generator.variant, undefined);
+});
+
+test("generator selection refuses missing, malformed or unavailable metadata", () => {
+  for (const input of [undefined, {}, { providers: [], models: null }, { providers: "x", models: [] }]) {
+    const selected = selectCommitGenerator(input);
+    assert.equal(selected.ok, false);
+    assert.equal(selected.error.code, "generator-probe-failed");
+  }
+
+  const neither = selectCommitGenerator({ providers: [proxyProvider, nativeProvider], models: [] });
+  assert.equal(neither.ok, false);
+  assert.equal(neither.error.code, "model-unavailable");
+
+  const disabledProxy = selectCommitGenerator({
+    providers: [{ ...proxyProvider, activation: "disabled" }, nativeProvider],
+    models: [advertisedModel("opencodex", "gpt-6-luna", { variants: ["low"] })],
+  });
+  assert.equal(disabledProxy.ok, false, "a disabled proxy is not silently used");
+
+  const disabledNativeModel = selectCommitGenerator({
+    providers: [nativeProvider],
+    models: [advertisedModel("openai", "gpt-6-luna", { enabled: false })],
+  });
+  assert.equal(disabledNativeModel.ok, false);
+  assert.equal(disabledNativeModel.error.code, "model-unavailable");
 });
 
 // --------------------------------------------------------- luna generation
@@ -1044,6 +1187,101 @@ test("push needs a confirmation and a preview token; previewPush names the targe
   actions.dispose();
 });
 
+test("push previews redact credentials but the token keeps the exact raw target", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  connectUpstream(repo);
+  // Git resolves the raw URL below; no network is reached because the push
+  // itself is answered by the wrapper. The credential must never reach the UI.
+  repo.git("remote", "set-url", "origin", "https://alice:hunter2@example.invalid/acme/repo.git");
+  repo.write("a.txt", "changed\n");
+  repo.git("add", "a.txt");
+  repo.git("commit", "-qm", "change");
+
+  const calls = [];
+  const actions = newActions({
+    exec: async (call) => {
+      calls.push(call);
+      if (call.args.includes("push")) {
+        return { ok: true, code: 0, spawnError: null, timedOut: false, stdout: "To example.invalid\n", stderr: "" };
+      }
+      return defaultExec(call);
+    },
+  });
+  const preview = await actions.previewPush({ cwd: repo.dir });
+  assert.equal(preview.ok, true, JSON.stringify(preview.error));
+  assert.equal(preview.destination, "https://example.invalid/acme/repo.git");
+  assert.deepEqual(preview.destinations, ["https://example.invalid/acme/repo.git"]);
+  assert.equal(JSON.stringify(preview).includes("hunter2"), false, "no credential in the preview");
+  assert.equal(JSON.stringify(preview).includes("alice"), false, "no username in the preview");
+
+  // The recheck and the push still compare against the raw URL kept in the
+  // token: a redacted internal target would fail as repo-changed here.
+  const pushed = await actions.push({ token: preview.token, confirm: true });
+  assert.equal(pushed.ok, true, JSON.stringify(pushed.error));
+  assert.equal(pushed.destination, "https://example.invalid/acme/repo.git");
+  assert.equal(JSON.stringify(pushed).includes("hunter2"), false, "no credential in the push result");
+  assert.equal(calls.some((call) => call.args.join(" ").includes("hunter2")), false, "the credential never enters argv");
+  actions.dispose();
+});
+
+test("a push recheck compares the raw URL, not the redacted display copy", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  connectUpstream(repo);
+  repo.git("remote", "set-url", "origin", "https://alice:hunter2@example.invalid/acme/repo.git");
+  repo.write("a.txt", "changed\n");
+  repo.git("add", "a.txt");
+  repo.git("commit", "-qm", "change");
+
+  const actions = newActions();
+  const preview = await actions.previewPush({ cwd: repo.dir });
+  assert.equal(preview.ok, true, JSON.stringify(preview.error));
+  // Only the credential rotates; the redacted display would be identical. The
+  // service must notice because its token kept the exact raw destination.
+  repo.git("remote", "set-url", "origin", "https://alice:hunter3@example.invalid/acme/repo.git");
+  const moved = await actions.push({ token: preview.token, confirm: true });
+  assert.equal(moved.ok, false);
+  assert.equal(moved.error.code, "repo-changed");
+  assert.equal(moved.error.message.includes("hunter"), false, "the refusal carries no credential");
+  actions.dispose();
+});
+
+test("a failed push redacts credentials from git stderr", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  connectUpstream(repo);
+  repo.git("remote", "set-url", "origin", "https://alice:hunter2@example.invalid/acme/repo.git");
+  repo.write("a.txt", "changed\n");
+  repo.git("add", "a.txt");
+  repo.git("commit", "-qm", "change");
+
+  const actions = newActions({
+    exec: async (call) => {
+      if (call.args.includes("push")) {
+        return {
+          ok: false,
+          code: 128,
+          spawnError: null,
+          timedOut: false,
+          stdout: "",
+          stderr: "fatal: unable to access 'https://alice:hunter2@example.invalid/acme/repo.git/': denied\n",
+        };
+      }
+      return defaultExec(call);
+    },
+  });
+  const preview = await actions.previewPush({ cwd: repo.dir });
+  assert.equal(preview.ok, true, JSON.stringify(preview.error));
+  const pushed = await actions.push({ token: preview.token, confirm: true });
+  assert.equal(pushed.ok, false);
+  assert.equal(pushed.error.code, "push-failed");
+  assert.equal(pushed.error.message.includes("hunter2"), false, "the stderr credential is stripped");
+  assert.equal(pushed.error.message.includes("alice"), false, "the stderr username is stripped");
+  assert.match(pushed.error.message, /example\.invalid/);
+  actions.dispose();
+});
+
 test("push sends an explicit refspec to the approved remote, never a force flag", async () => {
   const repo = makeRepo();
   baseline(repo);
@@ -1078,7 +1316,7 @@ test("push sends an explicit refspec to the approved remote, never a force flag"
   // The exact argv: follow-tags disabled twice over, then one remote and one
   // explicit refspec. A force, mirror or --all flag cannot appear because none
   // is built.
-  assert.deepEqual(pushCall.args, ["-c", "push.followTags=false", "push", "--no-follow-tags", "origin", "HEAD:refs/heads/main"]);
+  assert.deepEqual(pushCall.args, ["-c", "push.followTags=false", "push", "--no-follow-tags", "origin", `${preview.head}:refs/heads/main`]);
   assert.equal(pushCall.file, "git");
   for (const call of calls) {
     for (const arg of call.args) {
@@ -1147,16 +1385,20 @@ test("push refuses a token whose target moved, and a remote with several push ta
   assert.equal(moved.error.code, "repo-changed");
 
   // Two push URLs mean two destinations: never guess, refuse and name them.
-  const other = tempDir("git-test-bare2-");
-  gitIn(other, "init", "-q", "--bare");
-  const third = tempDir("git-test-bare3-");
-  gitIn(third, "init", "-q", "--bare");
+  // Their credentials are stripped before the message leaves the service.
+  const other = "https://alice:hunter2@example.invalid/one.git";
+  const third = "bob:swordfish@example.invalid:two.git";
   repo.git("config", "--add", "remote.origin.pushurl", other);
   repo.git("config", "--add", "remote.origin.pushurl", third);
   const many = await actions.previewPush({ cwd: repo.dir });
   assert.equal(many.ok, false);
   assert.equal(many.error.code, "multiple-push-targets");
   assert.match(many.error.message, /refusing to guess/);
+  assert.match(many.error.message, /example\.invalid/);
+  assert.equal(many.error.message.includes("hunter2"), false, "pushurl password stays private");
+  assert.equal(many.error.message.includes("swordfish"), false, "scp-like password stays private");
+  assert.equal(many.error.message.includes("alice"), false, "pushurl username stays private");
+  assert.equal(many.error.message.includes("bob"), false, "scp-like username stays private");
   actions.dispose();
 });
 
@@ -1374,6 +1616,90 @@ test("a failed reconcile still reports the commit hash and forbids a retry", asy
   actions.dispose();
 });
 
+test("discard during a commit defers token cleanup until the private index is free", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("a.txt", "changed\n");
+
+  const tmpRoot = tempDir("git-test-defer-");
+  let reachedCommit;
+  const commitReached = new Promise((resolve) => {
+    reachedCommit = resolve;
+  });
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const actions = newActions({
+    tmpRoot,
+    exec: async (call) => {
+      if (call.args.includes("commit")) {
+        reachedCommit();
+        await gate;
+      }
+      return defaultExec(call);
+    },
+  });
+  const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+  assert.equal(preview.ok, true, JSON.stringify(preview.error));
+  assert.equal(readdirSync(tmpRoot).length, 1, "the private review directory exists");
+
+  const pending = actions.commit({ token: preview.token, message: "fix: defer discard" });
+  await commitReached;
+
+  // The flow closed while git was about to commit. Deleting the token now would
+  // remove the private index git is still using, so the service queues it.
+  const discarded = actions.discard({ token: preview.token });
+  assert.equal(discarded.ok, true);
+  assert.equal(discarded.deferred, true);
+  assert.equal(existsSync(path.join(tmpRoot, readdirSync(tmpRoot)[0], "index")), true, "the index still exists for git");
+
+  release();
+  const committed = await pending;
+  assert.equal(committed.ok, true, JSON.stringify(committed.error));
+  assert.equal(repo.git("log", "-1", "--format=%s").trim(), "fix: defer discard");
+  assert.equal(readdirSync(tmpRoot).length, 0, "the deferred token's temp directory is gone after settle");
+  // The token was spent by the commit; the deferred cleanup is gone, not stuck.
+  const replay = await actions.commit({ token: preview.token, message: "fix: again" });
+  assert.equal(replay.error.code, "unknown-preview");
+  actions.dispose();
+});
+
+test("dispose during a commit also defers cleanup until the commit settles", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("a.txt", "changed\n");
+  const tmpRoot = tempDir("git-test-dispose-defer-");
+  let reachedCommit;
+  const commitReached = new Promise((resolve) => {
+    reachedCommit = resolve;
+  });
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const actions = newActions({
+    tmpRoot,
+    exec: async (call) => {
+      if (call.args.includes("commit")) {
+        reachedCommit();
+        await gate;
+      }
+      return defaultExec(call);
+    },
+  });
+  const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+  const pending = actions.commit({ token: preview.token, message: "fix: dispose defer" });
+  await commitReached;
+
+  actions.dispose();
+  assert.equal(readdirSync(tmpRoot).length, 1, "dispose does not delete state git is using");
+  release();
+  const committed = await pending;
+  assert.equal(committed.ok, true, JSON.stringify(committed.error));
+  assert.equal(readdirSync(tmpRoot).length, 0, "dispose cleanup runs after the commit settles");
+});
+
 test("discard releases a push preview token so it cannot be used later", async () => {
   const repo = makeRepo();
   baseline(repo);
@@ -1392,5 +1718,588 @@ test("discard releases a push preview token so it cannot be used later", async (
   assert.equal(replay.error.code, "unknown-push");
   // Nothing reached the remote.
   assert.equal(gitIn(repo.dir, "rev-parse", "origin/main").trim(), repo.git("rev-parse", "HEAD~1").trim());
+  actions.dispose();
+});
+
+// ------------------------------------------- frozen HEAD and reference guard
+
+test("a concurrent HEAD advance before the commit is rejected, not replayed onto the new tip", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("a.txt", "changed\n");
+  let concurrent = null;
+  let injected = false;
+  const actions = newActions({
+    exec: async (call) => {
+      if (!injected && call.args.includes("commit")) {
+        injected = true;
+        repo.write("c.txt", "concurrent\n");
+        gitIn(repo.dir, "add", "c.txt");
+        gitIn(repo.dir, "commit", "-qm", "concurrent");
+        concurrent = repo.git("rev-parse", "HEAD").trim();
+      }
+      return defaultExec(call);
+    },
+  });
+  const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+  assert.equal(preview.ok, true, JSON.stringify(preview.error));
+
+  const committed = await actions.commit({ token: preview.token, message: "fix: concurrent guard" });
+  assert.equal(committed.ok, false);
+  assert.equal(committed.error.code, "commit-rejected");
+  assert.match(committed.error.message, /moved before the commit/);
+  // The concurrent commit is still the tip; the reviewed commit was not created.
+  assert.equal(repo.git("rev-parse", "HEAD").trim(), concurrent);
+  assert.equal(repo.git("log", "--format=%s").trim().split("\n")[0], "concurrent");
+  assert.equal(repo.git("rev-list", "--count", "HEAD").trim(), "2");
+  assert.equal(repo.git("show", "HEAD:a.txt"), "one\n");
+  actions.dispose();
+});
+
+test("a HEAD advance during the pre-commit hook is rejected before publication", { skip: process.platform === "win32" }, async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("a.txt", "changed\n");
+  writeHook(
+    repo.path(".git/hooks/pre-commit"),
+    [
+      "unset GIT_INDEX_FILE",
+      "git -c core.hooksPath=/dev/null -c maintenance.auto=false commit --allow-empty --no-verify -qm concurrent",
+    ].join("\n"),
+  );
+
+  const actions = newActions();
+  const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+  const committed = await actions.commit({ token: preview.token, message: "fix: hook race" });
+  assert.equal(committed.ok, false);
+  // Git's own old-OID lock and the guard both fail closed here; either rejection
+  // is safe, and neither may publish the reviewed commit.
+  assert.ok(["commit-rejected", "commit-failed"].includes(committed.error.code), committed.error.code);
+  assert.equal(repo.git("log", "-1", "--format=%s").trim(), "concurrent");
+  assert.equal(repo.git("rev-list", "--count", "HEAD").trim(), "2");
+  actions.dispose();
+});
+
+test("a same-hash branch switch during the commit is rejected by the guard", { skip: process.platform === "win32" }, async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("a.txt", "changed\n");
+  const base = repo.git("rev-parse", "HEAD").trim();
+  repo.git("branch", "other");
+  let switched = false;
+  const actions = newActions({
+    exec: async (call) => {
+      if (!switched && call.args.includes("commit")) {
+        switched = true;
+        // Same commit, different branch: a hash-only check would pass here.
+        gitIn(repo.dir, "symbolic-ref", "HEAD", "refs/heads/other");
+      }
+      return defaultExec(call);
+    },
+  });
+  const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+  assert.equal(preview.ok, true, JSON.stringify(preview.error));
+
+  const committed = await actions.commit({ token: preview.token, message: "fix: branch race" });
+  assert.equal(committed.ok, false);
+  assert.equal(committed.error.code, "commit-rejected");
+  assert.equal(repo.git("symbolic-ref", "HEAD").trim(), "refs/heads/other");
+  assert.equal(repo.git("rev-parse", "main").trim(), base);
+  assert.equal(repo.git("rev-parse", "other").trim(), base);
+  assert.equal(repo.git("rev-list", "--count", "HEAD").trim(), "1");
+  actions.dispose();
+});
+
+test("an unborn branch and a detached HEAD both commit through the guard", async () => {
+  const unbornRepo = makeRepo();
+  unbornRepo.write("a.txt", "first\n");
+  const unbornActions = newActions();
+  const unbornPreview = await unbornActions.preview({ cwd: unbornRepo.dir, files: ["a.txt"] });
+  assert.equal(unbornPreview.ok, true, JSON.stringify(unbornPreview.error));
+  assert.equal(unbornPreview.head, null);
+  const unbornCommit = await unbornActions.commit({ token: unbornPreview.token, message: "feat: first" });
+  assert.equal(unbornCommit.ok, true, JSON.stringify(unbornCommit.error));
+  assert.equal(unbornRepo.git("show", "HEAD:a.txt"), "first\n");
+  assert.equal(unbornRepo.git("symbolic-ref", "HEAD").trim(), "refs/heads/main");
+  assert.equal(unbornRepo.git("rev-list", "--count", "HEAD").trim(), "1");
+  unbornActions.dispose();
+
+  const detachedRepo = makeRepo();
+  baseline(detachedRepo);
+  const main = detachedRepo.git("rev-parse", "main").trim();
+  detachedRepo.git("checkout", "-q", "--detach");
+  detachedRepo.write("a.txt", "detached\n");
+  const detachedActions = newActions();
+  const detachedPreview = await detachedActions.preview({ cwd: detachedRepo.dir, files: ["a.txt"] });
+  assert.equal(detachedPreview.ok, true, JSON.stringify(detachedPreview.error));
+  const detachedCommit = await detachedActions.commit({ token: detachedPreview.token, message: "fix: detached" });
+  assert.equal(detachedCommit.ok, true, JSON.stringify(detachedCommit.error));
+  assert.equal(detachedRepo.git("rev-parse", "HEAD").trim(), detachedCommit.hash);
+  assert.throws(() => detachedRepo.git("symbolic-ref", "--quiet", "HEAD"));
+  assert.equal(detachedRepo.git("rev-parse", "main").trim(), main);
+  detachedActions.dispose();
+});
+
+test("default, relative, absolute and disabled hooks are all dispatched faithfully", { skip: process.platform === "win32" }, async () => {
+  // A relative hooks path is resolved from the worktree root; an absolute one is
+  // used as written; /dev/null disables hooks entirely.
+  for (const mode of ["relative", "absolute", "disabled"]) {
+    const repo = makeRepo();
+    baseline(repo);
+    repo.write("a.txt", "changed\n");
+    const marker = path.join(tempDir("git-test-hook-marker-"), "ran");
+    const hookBody = `git config --get core.hooksPath > ${shellArg(marker)}`;
+    if (mode === "relative") {
+      mkdirSync(repo.path("custom-hooks"), { recursive: true });
+      writeHook(repo.path("custom-hooks/pre-commit"), hookBody);
+      repo.git("config", "core.hooksPath", "custom-hooks");
+    } else if (mode === "absolute") {
+      const hooks = tempDir("git-test-abs-hooks-");
+      writeHook(path.join(hooks, "pre-commit"), hookBody);
+      repo.git("config", "core.hooksPath", hooks);
+    } else {
+      writeHook(repo.path(".git/hooks/pre-commit"), hookBody);
+      repo.git("config", "core.hooksPath", "/dev/null");
+    }
+
+    const actions = newActions();
+    const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+    assert.equal(preview.ok, true, `${mode}: ${JSON.stringify(preview.error)}`);
+    const committed = await actions.commit({ token: preview.token, message: `fix: ${mode} hooks` });
+    assert.equal(committed.ok, true, `${mode}: ${JSON.stringify(committed.error)}`);
+    assert.equal(existsSync(marker), mode !== "disabled", `${mode}: hook dispatch`);
+    if (mode !== "disabled") {
+      // The original hook sees the real configuration: the outer -c hook path is
+      // not leaked through GIT_CONFIG_PARAMETERS to a nested git command.
+      const seen = readFileSync(marker, "utf8").trim();
+      const expected = mode === "relative" ? "custom-hooks" : repo.git("config", "--get", "core.hooksPath").trim();
+      assert.equal(seen, expected, `${mode}: original configuration is restored`);
+    }
+    actions.dispose();
+  }
+});
+
+test("the original reference-transaction hook still sees every transaction and can reject", { skip: process.platform === "win32" }, async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("a.txt", "changed\n");
+  const log = repo.path("rt.log");
+  writeHook(
+    repo.path(".git/hooks/reference-transaction"),
+    `{ printf 'STATE=%s\\n' "$1"; cat; } >> ${shellArg(log)}`,
+  );
+
+  const actions = newActions();
+  const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+  const committed = await actions.commit({ token: preview.token, message: "fix: forward transaction" });
+  assert.equal(committed.ok, true, JSON.stringify(committed.error));
+  const lines = readFileSync(log, "utf8");
+  // The original hook saw the prepared and committed states, with the same
+  // stdin the guard parsed, plus git's own no-op pseudo-ref transactions.
+  assert.match(lines, /STATE=prepared/);
+  assert.match(lines, /STATE=committed/);
+  assert.ok(lines.includes(`${preview.head} ${committed.hash} refs/heads/main`), lines);
+  assert.match(lines, /AUTO_MERGE/);
+
+  const rejecting = makeRepo();
+  baseline(rejecting);
+  rejecting.write("a.txt", "changed\n");
+  writeHook(
+    rejecting.path(".git/hooks/reference-transaction"),
+    `if [ "$1" = "prepared" ]; then echo original-ref-rejected >&2; exit 1; fi\nexit 0`,
+  );
+  const rejectingActions = newActions();
+  const rejectedPreview = await rejectingActions.preview({ cwd: rejecting.dir, files: ["a.txt"] });
+  const rejected = await rejectingActions.commit({ token: rejectedPreview.token, message: "fix: rejected transaction" });
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.error.code, "commit-rejected");
+  assert.match(rejected.error.message, /rejected/);
+  assert.equal(rejecting.git("rev-list", "--count", "HEAD").trim(), "1");
+  assert.equal(rejecting.git("log", "-1", "--format=%s").trim(), "init");
+  rejectingActions.dispose();
+  actions.dispose();
+});
+
+test("hook arguments, working directory and message pass through the dispatcher", { skip: process.platform === "win32" }, async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("a.txt", "changed\n");
+  const marker = path.join(tempDir("git-test-msg-marker-"), "commit-msg");
+  writeHook(
+    repo.path(".git/hooks/commit-msg"),
+    [
+      `{ printf 'cwd=%s\\n' "$(pwd)"`,
+      `  printf 'argc=%s\\n' "$#"`,
+      `  printf 'index=%s\\n' "$GIT_INDEX_FILE"`,
+      `  printf 'message=%s\\n' "$(head -n 1 "$1")"; } > ${shellArg(marker)}`,
+    ].join("\n"),
+  );
+
+  const actions = newActions();
+  const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+  const committed = await actions.commit({ token: preview.token, message: "fix: forwarded message" });
+  assert.equal(committed.ok, true, JSON.stringify(committed.error));
+  const seen = readFileSync(marker, "utf8");
+  assert.ok(seen.includes(`cwd=${repo.git("rev-parse", "--show-toplevel").trim()}`), seen);
+  assert.match(seen, /argc=1/);
+  assert.match(seen, /message=fix: forwarded message/);
+  // The hook still sees the private temp index, not the user's real index.
+  const indexLine = /index=(.+)/.exec(seen)?.[1];
+  assert.ok(indexLine, seen);
+  assert.notEqual(indexLine, repo.path(".git/index"));
+  assert.ok(indexLine.startsWith(BASE), indexLine);
+  actions.dispose();
+});
+
+test("a post-commit hook that moves HEAD reports the created hash and skips reconcile", { skip: process.platform === "win32" }, async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  // A reserve commit that the post-commit hook can move HEAD to without touching
+  // the real index.
+  repo.git("checkout", "-q", "-b", "reserve");
+  repo.write("c.txt", "reserve\n");
+  repo.git("add", "c.txt");
+  repo.git("commit", "-qm", "reserve");
+  const reserve = repo.git("rev-parse", "HEAD").trim();
+  repo.git("checkout", "-q", "main");
+  repo.write("a.txt", "changed\n");
+  writeHook(repo.path(".git/hooks/post-commit"), `git update-ref HEAD ${shellArg(reserve)}`);
+
+  const actions = newActions();
+  const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+  const committed = await actions.commit({ token: preview.token, message: "fix: post-commit move" });
+  assert.equal(committed.ok, false);
+  assert.equal(committed.error.code, "head-moved");
+  assert.equal(typeof committed.error.hash, "string");
+  assert.equal(repo.git("cat-file", "-t", committed.error.hash).trim(), "commit");
+  assert.equal(repo.git("show", `${committed.error.hash}:a.txt`), "changed\n");
+  assert.notEqual(committed.error.hash, reserve, "the recorded hash is the created commit, not the moved HEAD");
+  assert.equal(repo.git("rev-parse", "HEAD").trim(), reserve);
+  assert.match(committed.error.message, /do not retry/);
+  // The reconcile was skipped: the real index still holds the old selected blob.
+  assert.equal(repo.git("show", ":a.txt"), "one\n");
+  actions.dispose();
+});
+
+test("an unreadable real index fails closed at preview, recheck and reconcile", async () => {
+  const isDigest = (call) => call.args[0] === "ls-files" && call.args.includes("--stage");
+
+  const previewRepo = makeRepo();
+  baseline(previewRepo);
+  previewRepo.write("a.txt", "changed\n");
+  const previewRoot = tempDir("git-test-digest-preview-");
+  const previewActions = newActions({
+    tmpRoot: previewRoot,
+    exec: async (call) => (isDigest(call) ? failingCall("ls-files failed") : defaultExec(call)),
+  });
+  const preview = await previewActions.preview({ cwd: previewRepo.dir, files: ["a.txt"] });
+  assert.equal(preview.ok, false);
+  assert.equal(preview.error.code, "index-unreadable");
+  assert.equal(readdirSync(previewRoot).length, 0, "no token state is left behind");
+  previewActions.dispose();
+
+  const recheckRepo = makeRepo();
+  baseline(recheckRepo);
+  recheckRepo.write("a.txt", "changed\n");
+  let failDigest = false;
+  const recheckActions = newActions({
+    exec: async (call) => (failDigest && isDigest(call) ? failingCall("ls-files failed") : defaultExec(call)),
+  });
+  const recheckPreview = await recheckActions.preview({ cwd: recheckRepo.dir, files: ["a.txt"] });
+  failDigest = true;
+  const recheck = await recheckActions.commit({ token: recheckPreview.token, message: "fix: digest recheck" });
+  assert.equal(recheck.ok, false);
+  assert.equal(recheck.error.code, "index-unreadable");
+  assert.equal(recheckRepo.git("rev-list", "--count", "HEAD").trim(), "1");
+  // No commit was issued; the review token is still usable once the index reads.
+  failDigest = false;
+  const retried = await recheckActions.commit({ token: recheckPreview.token, message: "fix: digest recheck" });
+  assert.equal(retried.ok, true, JSON.stringify(retried.error));
+  recheckActions.dispose();
+
+  const reconcileRepo = makeRepo();
+  baseline(reconcileRepo);
+  reconcileRepo.write("a.txt", "changed\n");
+  let committed = false;
+  const reconcileActions = newActions({
+    exec: async (call) => {
+      if (isDigest(call) && committed) return failingCall("ls-files failed");
+      const result = await defaultExec(call);
+      if (call.args.includes("commit")) committed = true;
+      return result;
+    },
+  });
+  const reconcilePreview = await reconcileActions.preview({ cwd: reconcileRepo.dir, files: ["a.txt"] });
+  const reconciled = await reconcileActions.commit({ token: reconcilePreview.token, message: "fix: digest reconcile" });
+  assert.equal(reconciled.ok, false);
+  assert.equal(reconciled.error.code, "reconcile-index-unreadable");
+  assert.equal(reconciled.error.hash, reconcileRepo.git("rev-parse", "HEAD").trim());
+  assert.equal(reconcileRepo.git("show", ":a.txt"), "one\n", "the reset was skipped");
+  reconcileActions.dispose();
+});
+
+test("a Git older than the reference-transaction hook fails closed before committing", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("a.txt", "changed\n");
+  const actions = newActions({
+    exec: async (call) =>
+      call.args[0] === "--version"
+        ? { ok: true, code: 0, spawnError: null, timedOut: false, stdout: "git version 2.28.0\n", stderr: "" }
+        : defaultExec(call),
+  });
+  const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+  const committed = await actions.commit({ token: preview.token, message: "fix: old git" });
+  assert.equal(committed.ok, false);
+  assert.equal(committed.error.code, "git-too-old");
+  assert.match(committed.error.message, /Git 2\.29 or newer/);
+  assert.equal(repo.git("rev-list", "--count", "HEAD").trim(), "1");
+  actions.dispose();
+});
+
+test("a guard that cannot be prepared fails closed before git commit runs", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("a.txt", "changed\n");
+  const actions = newActions({
+    exec: async (call) =>
+      call.args[0] === "rev-parse" && call.args.includes("--git-path")
+        ? failingCall("fatal: cannot resolve hooks path")
+        : defaultExec(call),
+  });
+  const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+  const committed = await actions.commit({ token: preview.token, message: "fix: guard setup" });
+  assert.equal(committed.ok, false);
+  assert.equal(committed.error.code, "guard-unavailable");
+  assert.equal(repo.git("rev-list", "--count", "HEAD").trim(), "1");
+  actions.dispose();
+});
+
+test("a guard that cannot record its state fails closed", { skip: process.platform === "win32" || process.getuid?.() === 0 }, async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("a.txt", "changed\n");
+  const tmpRoot = tempDir("git-test-guard-record-");
+  const actions = newActions({
+    tmpRoot,
+    exec: async (call) => {
+      if (call.args.includes("commit")) {
+        for (const name of readdirSync(tmpRoot)) {
+          const guard = path.join(tmpRoot, name, "guard");
+          if (existsSync(guard)) chmodSync(guard, 0o500);
+        }
+      }
+      return defaultExec(call);
+    },
+  });
+  const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+  const committed = await actions.commit({ token: preview.token, message: "fix: guard record" });
+  assert.equal(committed.ok, false);
+  assert.equal(repo.git("rev-list", "--count", "HEAD").trim(), "1");
+  actions.dispose();
+});
+
+test("push sends the frozen commit even if HEAD moves after the recheck", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  connectUpstream(repo);
+  repo.write("a.txt", "changed\n");
+  repo.git("add", "a.txt");
+  repo.git("commit", "-qm", "change");
+
+  const calls = [];
+  let advanced = false;
+  const actions = newActions({
+    exec: async (call) => {
+      if (!advanced && call.args.includes("push")) {
+        advanced = true;
+        repo.write("c.txt", "later\n");
+        gitIn(repo.dir, "add", "c.txt");
+        gitIn(repo.dir, "commit", "-qm", "later");
+        calls.push(call);
+        return { ok: true, code: 0, spawnError: null, timedOut: false, stdout: "To origin\n", stderr: "" };
+      }
+      return defaultExec(call);
+    },
+  });
+  const preview = await actions.previewPush({ cwd: repo.dir });
+  assert.equal(preview.ok, true, JSON.stringify(preview.error));
+  const pushed = await actions.push({ token: preview.token, confirm: true });
+  assert.equal(pushed.ok, true, JSON.stringify(pushed.error));
+
+  const pushCall = calls.find((call) => call.args.includes("push"));
+  assert.deepEqual(pushCall.args.slice(-2), ["origin", `${preview.head}:refs/heads/main`]);
+  assert.notEqual(preview.head, repo.git("rev-parse", "HEAD").trim(), "HEAD moved after the recheck");
+  actions.dispose();
+});
+
+test("the busy lock stays held until post-commit verification and reconcile settle", async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("a.txt", "changed\n");
+  let releaseShow;
+  const showGate = new Promise((resolve) => {
+    releaseShow = resolve;
+  });
+  let reachedShow;
+  const showReached = new Promise((resolve) => {
+    reachedShow = resolve;
+  });
+  const actions = newActions({
+    exec: async (call) => {
+      if (call.args[0] === "show" && call.args.includes("--format=%B")) {
+        reachedShow();
+        await showGate;
+      }
+      return defaultExec(call);
+    },
+  });
+  const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+  const pending = actions.commit({ token: preview.token, message: "fix: slow verification" });
+  await showReached;
+
+  // The ref is published, but the service must stay busy until the recorded
+  // commit has been verified and the index reconciled.
+  assert.ok(actions.active(), "the commit flow is still active");
+  assert.equal(actions.active().phase, "commit");
+  const blocked = await actions.status({ cwd: repo.dir });
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.error.code, "busy");
+
+  releaseShow();
+  const committed = await pending;
+  assert.equal(committed.ok, true, JSON.stringify(committed.error));
+  assert.equal(actions.active(), null);
+  actions.dispose();
+});
+
+test("a post-commit same-hash branch switch skips reconciliation", { skip: process.platform === "win32" }, async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("a.txt", "changed\n");
+  writeHook(
+    repo.path(".git/hooks/post-commit"),
+    ["git branch other HEAD", "git symbolic-ref HEAD refs/heads/other"].join("\n"),
+  );
+
+  const actions = newActions();
+  const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+  const committed = await actions.commit({ token: preview.token, message: "fix: same hash switch" });
+  assert.equal(committed.ok, false);
+  assert.equal(committed.error.code, "head-moved");
+  assert.equal(committed.error.hash, repo.git("rev-parse", "HEAD").trim());
+  assert.equal(repo.git("symbolic-ref", "HEAD").trim(), "refs/heads/other");
+  assert.equal(repo.git("rev-parse", "main").trim(), committed.error.hash);
+  assert.equal(repo.git("rev-parse", "other").trim(), committed.error.hash);
+  // The branch move was detected from the frozen identity, so the selected path
+  // was not reset against the new branch.
+  assert.equal(repo.git("show", ":a.txt"), "one\n");
+  actions.dispose();
+});
+
+test("a committed-marker write failure is unknown, not a no-publication rejection", { skip: process.platform === "win32" || process.getuid?.() === 0 }, async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("a.txt", "changed\n");
+  const tmpRoot = tempDir("git-test-record-unknown-");
+  // The target transaction commits, then the guard cannot write its committed
+  // marker. A later AUTO_MERGE prepared rejection must not turn that published
+  // commit into a claimed no-publication outcome.
+  writeHook(
+    repo.path(".git/hooks/reference-transaction"),
+    [
+      'input=$(cat)',
+      'if [ "$1" = "committed" ]; then',
+      '  case "$input" in *" refs/heads/main"*) chmod 500 "${GIT_INDEX_FILE%/*}/guard" ;; esac',
+      'elif [ "$1" = "prepared" ]; then',
+      '  case "$input" in *" AUTO_MERGE"*) exit 1 ;; esac',
+      "fi",
+      "exit 0",
+    ].join("\n"),
+  );
+
+  const actions = newActions({ tmpRoot });
+  try {
+    const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+    const committed = await actions.commit({ token: preview.token, message: "fix: committed record" });
+    assert.equal(committed.ok, false);
+    assert.equal(committed.error.code, "commit-outcome-unknown");
+    assert.equal(committed.error.hash, undefined);
+    // The ref update did land: there are two commits and the message is on HEAD.
+    assert.equal(repo.git("rev-list", "--count", "HEAD").trim(), "2");
+    assert.equal(repo.git("log", "-1", "--format=%s").trim(), "fix: committed record");
+    // The review token is spent even though its outcome is unknown.
+    const replay = await actions.commit({ token: preview.token, message: "fix: again" });
+    assert.equal(replay.error.code, "unknown-preview");
+  } finally {
+    for (const name of readdirSync(tmpRoot)) {
+      const guard = path.join(tmpRoot, name, "guard");
+      if (existsSync(guard)) chmodSync(guard, 0o700);
+    }
+    actions.dispose();
+    for (const name of readdirSync(tmpRoot)) {
+      rmSync(path.join(tmpRoot, name), { recursive: true, force: true });
+    }
+  }
+});
+
+test("a prepared marker plus a later prepared rejection is unknown, not a no-publication claim", { skip: process.platform === "win32" }, async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  repo.write("a.txt", "changed\n");
+  const tmpRoot = tempDir("git-test-prepared-rejected-");
+  // The target commit is published but its committed marker is unusable. A
+  // later AUTO_MERGE prepared rejection must not turn that into "nothing was
+  // published": prepared plus rejected is ambiguous.
+  writeHook(
+    repo.path(".git/hooks/reference-transaction"),
+    [
+      'input=$(cat)',
+      'if [ "$1" = "committed" ]; then',
+      '  case "$input" in *" refs/heads/main"*) mkdir -p "${GIT_INDEX_FILE%/*}/guard/committed" ;; esac',
+      'elif [ "$1" = "prepared" ]; then',
+      '  case "$input" in *" AUTO_MERGE"*) exit 1 ;; esac',
+      "fi",
+      "exit 0",
+    ].join("\n"),
+  );
+
+  const actions = newActions({ tmpRoot });
+  const preview = await actions.preview({ cwd: repo.dir, files: ["a.txt"] });
+  const committed = await actions.commit({ token: preview.token, message: "fix: ambiguous guard state" });
+  assert.equal(committed.ok, false);
+  assert.equal(committed.error.code, "commit-outcome-unknown");
+  assert.equal(committed.error.hash, undefined);
+  assert.equal(repo.git("rev-list", "--count", "HEAD").trim(), "2");
+  assert.equal(repo.git("log", "-1", "--format=%s").trim(), "fix: ambiguous guard state");
+  const replay = await actions.commit({ token: preview.token, message: "fix: again" });
+  assert.equal(replay.error.code, "unknown-preview");
+  actions.dispose();
+});
+
+test("a linked worktree commits on its own branch with its relative hooks", { skip: process.platform === "win32" }, async () => {
+  const repo = makeRepo();
+  baseline(repo);
+  const main = repo.git("rev-parse", "main").trim();
+  const worktree = path.join(tempDir("git-test-worktree-"), "wt");
+  gitIn(repo.dir, "worktree", "add", "-q", "-b", "feature", worktree);
+  mkdirSync(path.join(worktree, ".githooks"), { recursive: true });
+  const marker = path.join(tempDir("git-test-worktree-marker-"), "ran");
+  writeHook(path.join(worktree, ".githooks", "pre-commit"), `: > ${shellArg(marker)}`);
+  writeFileSync(path.join(worktree, "a.txt"), "linked change\n");
+  // Per-worktree configuration: the relative path is resolved from this
+  // worktree, not from the main checkout or the common git directory.
+  repo.git("config", "extensions.worktreeConfig", "true");
+  gitIn(worktree, "config", "--worktree", "core.hooksPath", ".githooks");
+
+  const actions = newActions();
+  const preview = await actions.preview({ cwd: worktree, files: ["a.txt"] });
+  assert.equal(preview.ok, true, JSON.stringify(preview.error));
+  const committed = await actions.commit({ token: preview.token, message: "fix: linked worktree" });
+  assert.equal(committed.ok, true, JSON.stringify(committed.error));
+  assert.equal(existsSync(marker), true, "the relative hook ran from the linked worktree");
+  assert.equal(gitIn(worktree, "rev-parse", "HEAD").trim(), committed.hash);
+  assert.equal(gitIn(worktree, "symbolic-ref", "HEAD").trim(), "refs/heads/feature");
+  assert.equal(repo.git("rev-parse", "main").trim(), main);
   actions.dispose();
 });

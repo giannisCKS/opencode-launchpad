@@ -876,6 +876,110 @@ test("stops the owned process and marks it stopped", async () => {
   }
 });
 
+test("a stopped run drops its pending-stop flags once the group is gone", async () => {
+  const manager = createRunnerManager({ notifyMs: 0, killGraceMs: 2000 });
+  try {
+    const { key } = manager.start({
+      actionId: "mobile-live",
+      label: "Mobile live",
+      command: NODE,
+      args: ["-e", "setInterval(() => {}, 1000)"],
+      cwd: tmpdir(),
+    });
+    assert.equal(manager.stop(key), true);
+    await waitFor(() => !manager.snapshot(key).running, "stop");
+    await waitFor(() => manager.snapshot(key).stopping === false, "pending stop cleared");
+    const snapshot = manager.snapshot(key);
+    assert.equal(snapshot.status, "stopped");
+    assert.equal(snapshot.stopping, false);
+    assert.equal(snapshot.orphaned, false);
+    assert.equal(snapshot.stopError, undefined);
+  } finally {
+    manager.dispose();
+  }
+});
+
+test("the final SIGKILL eventually clears pending-stop flags", async () => {
+  const signals = [];
+  let groupExists = true;
+  const manager = createRunnerManager({
+    notifyMs: 0,
+    killGraceMs: 30,
+    gonePollMs: 5,
+    gonePollLimit: 50,
+    probeGroup: () => groupExists,
+    readProcessStat: () => undefined,
+    killProcessGroup: (pgid, signal) => {
+      signals.push(signal);
+    },
+  });
+  let pid;
+  try {
+    const { key, run } = manager.start({
+      actionId: "mobile-live",
+      label: "Async kill",
+      command: NODE,
+      args: ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"],
+      cwd: tmpdir(),
+    });
+    pid = run.pid;
+    assert.equal(manager.stop(key), true);
+    await waitFor(() => signals.includes("SIGKILL"), "grace SIGKILL");
+    assert.equal(manager.snapshot(key).stopping, true);
+    // The leader ignores signals in this test, so only the bounded probe can
+    // report the truth once the group is gone.
+    groupExists = false;
+    await waitFor(() => manager.snapshot(key).stopping === false, "gone confirmation");
+    assert.equal(manager.snapshot(key).orphaned, false);
+  } finally {
+    manager.dispose();
+    if (pid) {
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        // group already gone
+      }
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
+  }
+});
+
+test("a successful stop retry clears the previous stop error", async () => {
+  let refuse = true;
+  const manager = createRunnerManager({
+    notifyMs: 0,
+    killGraceMs: 1000,
+    killProcessGroup: (pgid, signal) => {
+      if (refuse && signal === "SIGTERM") {
+        refuse = false;
+        throw Object.assign(new Error("operation not permitted"), { code: "EPERM" });
+      }
+      return process.kill(-pgid, signal);
+    },
+  });
+  try {
+    const { key } = manager.start({
+      actionId: "mobile-live",
+      label: "Retry stop",
+      command: NODE,
+      args: ["-e", "setInterval(() => {}, 1000)"],
+      cwd: tmpdir(),
+    });
+    assert.equal(manager.stop(key), false);
+    assert.match(manager.snapshot(key).stopError, /EPERM/);
+    assert.equal(manager.stop(key), true);
+    await waitFor(() => !manager.snapshot(key).running, "retry stop");
+    assert.equal(manager.snapshot(key).stopError, undefined);
+    assert.deepEqual(manager.stopAll(), { stopped: 0, failed: 0 });
+  } finally {
+    manager.dispose();
+  }
+});
+
 test("dispose stops every owned child", async () => {
   const manager = createRunnerManager({ notifyMs: 0, killGraceMs: 2000 });
   const { run } = manager.start({

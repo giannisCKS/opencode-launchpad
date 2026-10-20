@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 // Sidebar rows and log dialog for the project runners plugin.
-import { createMemo, createSignal, For, Index, onCleanup, Show } from "solid-js";
+import { createMemo, createSignal, For, Index, onCleanup, onMount, Show } from "solid-js";
 import {
   buttonVisual,
   controlVisual,
@@ -350,6 +350,11 @@ export function LogDialog(props) {
   onCleanup(runtime.manager.subscribe(() => setTick((value) => value + 1)));
   const timer = setInterval(() => setTick((value) => value + 1), 1000);
   onCleanup(() => clearInterval(timer));
+  // Optional lifecycle notification for the runtime that owns this popup. It
+  // only says the dialog unmounted; closing never stops the runner.
+  onCleanup(() => {
+    if (typeof props.onClose === "function") props.onClose();
+  });
 
   const snapshot = () => {
     tick();
@@ -372,7 +377,7 @@ export function LogDialog(props) {
         when={snapshot()}
         fallback={
           <box flexDirection="column">
-            <text fg={token(theme, "textMuted")}>Run finished and was cleared.</text>
+            <text fg={token(theme, "textMuted")}>Runner is no longer tracked.</text>
             <box flexDirection="row" paddingTop={1}>
               <Button theme={theme} label="Close esc" onPress={close} />
             </box>
@@ -428,7 +433,7 @@ export function LogDialog(props) {
                 </Show>
               </box>
             </scrollbox>
-            <box flexDirection="row" gap={1} paddingTop={1}>
+            <box flexDirection="row" gap={1} paddingTop={1} flexShrink={0}>
               <Button
                 theme={theme}
                 label="Stop s"
@@ -456,11 +461,81 @@ export function LogDialog(props) {
   );
 }
 
+// Enter starts a new line, which is what a commit body needs. The textarea
+// already submits on meta+return (Alt+Enter); Ctrl+Enter saves too wherever the
+// terminal can tell it apart from a plain Return. Saving only hands the text
+// back to the flow, so no key here can commit anything by itself.
+const EDIT_SAVE_KEYS = [{ name: "return", ctrl: true, action: "submit" }];
+
+// The commit message field. The flow owns the draft, so the field only reports
+// what is typed and never keeps a copy of its own: the text the editor opens
+// with is the draft as it stood, and a save hands the same draft back.
+function MessageEditor(props) {
+  const { theme } = props;
+  const initial = typeof props.text === "string" ? props.text : "";
+  const [cursorLine, setCursorLine] = createSignal(1);
+  const [lineCount, setLineCount] = createSignal(initial.split("\n").length);
+  let field;
+  // The editor opens at the start, so the subject and the beginning of the
+  // message are reviewed before the caret scrolls to the tail. End and Home
+  // move through the whole draft; nothing is cut.
+  const refreshPosition = () => {
+    const count = field?.lineCount;
+    if (typeof count === "number" && count > 0) setLineCount(count);
+    const row = field?.logicalCursor?.row;
+    if (typeof row === "number") setCursorLine(row + 1);
+  };
+  onMount(() => {
+    if (!field) return;
+    try {
+      field.cursorOffset = 0;
+    } catch {
+      // Some fields do not support cursor assignment; mounting must still
+      // succeed, so refreshPosition below owns the initial position.
+    }
+    refreshPosition();
+  });
+  // The host reports what changed, not always the text itself: read the field
+  // when the argument is not the text, so the flow gets the real message.
+  const report = (value) => {
+    if (typeof value === "string") return props.onChange?.(value);
+    const text = field?.plainText;
+    return props.onChange?.(typeof text === "string" ? text : "");
+  };
+  return (
+    <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={5}>
+      {/* A field without a scrollbar needs to say that it scrolls. The line
+          counter moves with the caret, so the top and the tail can be told
+          apart without guessing how many rows are hidden. */}
+      <text fg={token(theme, "textMuted")} wrapMode="word" flexShrink={0}>
+        {`Message · line ${cursorLine()} of ${lineCount()}`}
+      </text>
+      <textarea
+        ref={(node) => { field = node; }}
+        initialValue={initial}
+        placeholder="Write a subject, then a blank line and details"
+        focused
+        flexGrow={1}
+        flexShrink={1}
+        minHeight={4}
+        marginTop={1}
+        wrapMode="word"
+        scrollMargin={1}
+        textColor={token(theme, "textBase")}
+        focusedTextColor={token(theme, "textBase")}
+        keyBindings={EDIT_SAVE_KEYS}
+        onCursorChange={() => refreshPosition()}
+        onContentChange={(value) => { report(value); refreshPosition(); }}
+        onSubmit={() => props.onSave?.()}
+      />
+    </box>
+  );
+}
+
 // The Git dialogs. Commit and Push share one flow object: each step reads its
-// state from the runtime, so the host message prompt can replace this dialog and
-// the flow survives the remount. Escape closes the dialog through the host,
-// which cancels the flow and drops whatever it had frozen: it can never commit
-// or push. Nothing here runs git.
+// state from the runtime, so the dialog holds no copy of it. Escape closes the
+// dialog through the host, which cancels the flow and drops whatever it had
+// frozen: it can never commit or push. Nothing here runs git.
 export function GitDialog(props) {
   const { context, flow } = props;
   const theme = context.theme;
@@ -546,9 +621,24 @@ export function GitDialog(props) {
   // so it does not stick to the bottom like the live log does.
   const diffLines = () => String(state()?.preview?.diff ?? "").split("\n");
 
+  // The preview names the destination the preflight selected. A legacy host
+  // reports it as unverified, so the view says it is the assumed default rather
+  // than claiming a configured route was found.
+  const generatorProvider = () =>
+    state()?.generator?.providerName || state()?.generator?.providerID || "the configured provider";
+  const generatorModel = () => {
+    const generator = state()?.generator;
+    if (!generator) return "Luna";
+    const model = generator.id || "Luna";
+    return generator.variant ? `${model} (${generator.variant})` : model;
+  };
+
   // The scrollbar draws over the last content column, so one column of padding
-  // keeps every wrapped diff byte clear of it.
-  const diffBox = () => (
+  // keeps every wrapped diff byte clear of it. The box takes focus on the steps
+  // where it is the only thing that can be scrolled; the edit step keeps focus
+  // in the message field instead. The optional header scrolls with the diff, so
+  // a long confirmation message is never a clipped block above the dialog.
+  const diffBox = (autoFocus = true, header = null) => (
     <scrollbox
       scrollY
       flexGrow={1}
@@ -556,6 +646,7 @@ export function GitDialog(props) {
       maxHeight={16}
       paddingRight={1}
       ref={(node) => {
+        if (!autoFocus) return;
         try {
           node?.focus?.();
         } catch {
@@ -564,6 +655,10 @@ export function GitDialog(props) {
       }}
     >
       <box flexDirection="column">
+        {header}
+        <text fg={token(theme, "textMuted")} wrapMode="word">
+          Frozen diff
+        </text>
         <For each={diffLines()}>
           {(line) => (
             <text fg={token(theme, "textMuted")} wrapMode="char">
@@ -578,19 +673,19 @@ export function GitDialog(props) {
   return (
     <box flexDirection="column" paddingLeft={1} paddingRight={1}>
       <Show when={state()} fallback={<box flexDirection="column" />}>
-        <text fg={token(theme, "textBase")} wrapMode="none">
+        <text fg={token(theme, "textBase")} wrapMode="none" flexShrink={0}>
           <b>{state().kind === "push" ? "Push to the configured remote" : "Commit selected files"}</b>
         </text>
-        <text fg={token(theme, "textMuted")} wrapMode="word">
+        <text fg={token(theme, "textMuted")} wrapMode="word" flexShrink={0}>
           {header()}
         </text>
         <Show when={state()?.notice}>
-          <text fg={token(theme, "textMuted")} wrapMode="word">
+          <text fg={token(theme, "textMuted")} wrapMode="word" flexShrink={0}>
             {state().notice}
           </text>
         </Show>
         <Show when={state()?.error}>
-          <text fg={token(theme, "textError")} wrapMode="word">
+          <text fg={token(theme, "textError")} wrapMode="word" flexShrink={0}>
             {state().error.message}
           </text>
         </Show>
@@ -606,7 +701,7 @@ export function GitDialog(props) {
         </Show>
 
         <Show when={step("files")}>
-          <text fg={token(theme, "textMuted")} wrapMode="word">
+          <text fg={token(theme, "textMuted")} wrapMode="word" flexShrink={0}>
             Session changes are preselected. Review the selection before continuing.
           </text>
           <scrollbox scrollY flexGrow={1} minHeight={4} maxHeight={16}>
@@ -619,47 +714,101 @@ export function GitDialog(props) {
           </scrollbox>
           {/* The ⊘ column explained in one short line. Hovering a control
               replaces it with that control's own explanation. */}
-          <text fg={token(theme, "textMuted")} wrapMode="word">
+          <text fg={token(theme, "textMuted")} wrapMode="word" flexShrink={0}>
             {ignoreHint() || "⊘ adds an untracked file to .gitignore. It only applies to untracked files."}
           </text>
         </Show>
 
         <Show when={step("preview") || step("confirm")}>
-          <text fg={token(theme, "textMuted")} wrapMode="word">
-            {String(state()?.preview?.stat ?? "").trim()}
-          </text>
-          <Show when={step("confirm")}>
-            <text fg={token(theme, "textBase")} wrapMode="word">
-              {state().message}
-            </text>
+          <Show when={step("preview")}>
+            {/* The disclosure, the file list, the stat and the frozen diff share
+                one review scroll box, so a narrow terminal cannot push the
+                actions below the viewport. The exact destination is still the
+                first thing shown, and Generate message stays in the fixed
+                footer. That press is the approval; there is no second sharing
+                screen. */}
+            {diffBox(
+              true,
+              <box flexDirection="column">
+                <Show when={state()?.generator}>
+                  <text fg={token(theme, "textBase")} wrapMode="word">
+                    Sending this selected frozen diff to {generatorProvider()} using {generatorModel()} is
+                    the only thing that leaves your machine in this flow. The provider only drafts a
+                    message: no tools run and no session is created. Generate message sends this exact
+                    diff; you can edit the message before the final commit.
+                  </text>
+                  <text fg={token(theme, "textMuted")} wrapMode="word">
+                    Files in the diff: {state().selection.join(", ")}
+                  </text>
+                  <Show when={state()?.generator?.verified === false}>
+                    <text fg={token(theme, "textMuted")} wrapMode="word">
+                      This host does not list providers or models, so this destination is the assumed
+                      default, not verified.
+                    </text>
+                  </Show>
+                </Show>
+                <text fg={token(theme, "textMuted")} wrapMode="word">
+                  {String(state()?.preview?.stat ?? "").trim()}
+                </text>
+              </box>
+            )}
           </Show>
-          {diffBox()}
+          <Show when={step("confirm")}>
+            {/* The whole message and the frozen diff share one review scroll
+                box. The subject is at the start; the tail and the diff are
+                reachable by scrolling; Commit stays in the fixed footer. */}
+            <text fg={token(theme, "textMuted")} wrapMode="word" flexShrink={0}>
+              Scroll: mouse wheel or PgUp/PgDn · End jumps to the end · Home returns to the top
+            </text>
+            {diffBox(
+              true,
+              <box flexDirection="column">
+                <text fg={token(theme, "textMuted")} wrapMode="word">
+                  Message
+                </text>
+                <text fg={token(theme, "textBase")} wrapMode="word">
+                  {state().message}
+                </text>
+                <text fg={token(theme, "textMuted")} wrapMode="word">
+                  — end of message —
+                </text>
+                <text fg={token(theme, "textMuted")} wrapMode="word">
+                  {String(state()?.preview?.stat ?? "").trim()}
+                </text>
+              </box>
+            )}
+          </Show>
         </Show>
 
-        <Show when={step("egress")}>
-          <text fg={token(theme, "textBase")} wrapMode="word">
-            Sending this selected frozen diff to OpenCodex, your configured provider,
-            using gpt-6-luna, is the only thing that leaves your machine in this flow.
-            OpenCodex only drafts a message: no tools run and no session is created.
-            Approve it to get a message you can edit before the final commit.
+        <Show when={step("edit")}>
+          {/* The frozen diff was already reviewed and owns no space here: the
+              editor gets every row the footer leaves. Movement keys are stated
+              because this field has no visible scrollbar. */}
+          <text fg={token(theme, "textMuted")} wrapMode="word" flexShrink={0}>
+            Arrows scroll · End shows the tail · Home returns to the top
           </text>
-          <text fg={token(theme, "textMuted")} wrapMode="word">
-            Files in the diff: {state().selection.join(", ")}
+          <text fg={token(theme, "textMuted")} wrapMode="word" flexShrink={0}>
+            Enter adds a line · Alt+Enter saves · Cancel discards changes · Esc closes the flow
           </text>
-          {diffBox()}
+          {MessageEditor({
+            theme,
+            text: state().draft,
+            onChange: (value) => flow.draftChanged?.(value),
+            onSave: () => flow.saveMessage?.(),
+          })}
         </Show>
 
         <Show when={step("blocked")}>
-          <text fg={token(theme, "textError")} wrapMode="word">
+          <text fg={token(theme, "textError")} wrapMode="word" flexShrink={0}>
             {state().notice}
           </text>
         </Show>
 
         <Show when={step("push-review") || step("push-confirm")}>
-          <text fg={token(theme, "textBase")} wrapMode="word">
+          <text fg={token(theme, "textBase")} wrapMode="word" flexShrink={0}>
             Destination: {state().push.destination}
           </text>
-          <text fg={token(theme, "textMuted")} wrapMode="word">
+          <text fg={token(theme, "textMuted")} wrapMode="word" flexShrink={0}>
             Upstream: {state().push.upstream} · outgoing commits: {state().push.outgoing}
           </text>
           <scrollbox scrollY flexGrow={1} minHeight={3} maxHeight={10}>
@@ -674,20 +823,20 @@ export function GitDialog(props) {
             </box>
           </scrollbox>
           <Show when={step("push-confirm")}>
-            <text fg={token(theme, "textBase")} wrapMode="word">
+            <text fg={token(theme, "textBase")} wrapMode="word" flexShrink={0}>
               This sends those commits to the destination above. No force, no other refs.
             </text>
           </Show>
         </Show>
 
         <Show when={step("committed")}>
-          <text fg={token(theme, "textBase")} wrapMode="word">
+          <text fg={token(theme, "textBase")} wrapMode="word" flexShrink={0}>
             The commit is already in history, so it was not retried. Close this window and
             reconcile the leftover files by hand if they still matter.
           </text>
         </Show>
 
-        <box flexDirection="row" gap={1} paddingTop={1}>
+        <box flexDirection="row" flexWrap="wrap" gap={1} paddingTop={1} flexShrink={0}>
           <Show when={step("loading")}>
             <Button theme={theme} label="Cancel esc" onPress={() => flow.cancel()} />
           </Show>
@@ -704,18 +853,14 @@ export function GitDialog(props) {
             <Button
               theme={theme}
               label="Generate message"
-              disabled={busy()}
-              onPress={() => flow.askEgress()}
+              disabled={!state()?.generator || busy()}
+              onPress={() => flow.approveEgress()}
             />
-            <Button theme={theme} label="Back" disabled={busy()} onPress={() => flow.back()} />
-            <Button theme={theme} label="Cancel esc" onPress={() => flow.cancel()} />
-          </Show>
-          <Show when={step("egress")}>
             <Button
               theme={theme}
-              label="Send diff to OpenCodex"
+              label="Write message"
               disabled={busy()}
-              onPress={() => flow.approveEgress()}
+              onPress={() => flow.editMessage()}
             />
             <Button theme={theme} label="Back" disabled={busy()} onPress={() => flow.back()} />
             <Button theme={theme} label="Cancel esc" onPress={() => flow.cancel()} />
@@ -735,6 +880,15 @@ export function GitDialog(props) {
             />
             <Button theme={theme} label="Back" disabled={busy()} onPress={() => flow.back()} />
             <Button theme={theme} label="Cancel esc" onPress={() => flow.cancel()} />
+          </Show>
+          <Show when={step("edit")}>
+            <Button
+              theme={theme}
+              label="Save message"
+              disabled={busy()}
+              onPress={() => flow.saveMessage?.()}
+            />
+            <Button theme={theme} label="Cancel" disabled={busy()} onPress={() => flow.cancelMessage?.()} />
           </Show>
           <Show when={step("blocked")}>
             <Button theme={theme} label="Back to files" onPress={() => flow.back()} />
@@ -1383,7 +1537,7 @@ export function SettingsDialog(props) {
             </text>
           </box>
         </Show>
-        <box flexDirection="row" gap={1} paddingTop={1}>
+        <box flexDirection="row" gap={1} paddingTop={1} flexShrink={0}>
           <Button theme={theme} label="New button" onPress={startNew} />
           <Button theme={theme} label="Show all buttons" disabled={hiddenCount() === 0} onPress={showAll} />
           <Button theme={theme} label="Close esc" onPress={close} />
@@ -1449,7 +1603,7 @@ export function SettingsDialog(props) {
             {draft()?.cwd ? `Runs in ${draft().cwd}` : "Runs in this project's directory"}
           </text>
         </box>
-        <box flexDirection="row" gap={1} paddingTop={1}>
+        <box flexDirection="row" gap={1} paddingTop={1} flexShrink={0}>
           <Button theme={theme} label="Save" onPress={save} />
           <Button theme={theme} label="Cancel" onPress={back} />
           <Show when={draft()?.overridden}>
@@ -1470,7 +1624,7 @@ export function SettingsDialog(props) {
             {configError().message}
           </text>
         </Show>
-        <box flexDirection="row" gap={1} paddingTop={1}>
+        <box flexDirection="row" gap={1} paddingTop={1} flexShrink={0}>
           <Button theme={theme} label="Delete button" onPress={confirmDelete} />
           <Button theme={theme} label="Keep" onPress={back} />
         </box>

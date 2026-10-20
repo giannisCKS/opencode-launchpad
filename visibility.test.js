@@ -127,6 +127,32 @@ test("subscribers are notified on a change and a disposer unsubscribes", () => {
   assert.equal(seen, 2, "the disposer removed the listener");
 });
 
+test("a listener removed or added during notify does not change the current delivery", () => {
+  const store = createVisibilityStore({ kv: fakeKv() });
+  const seen = [];
+  let added = false;
+  const late = () => seen.push("late");
+  const remove = store.subscribe(() => {
+    seen.push("first");
+    remove();
+    if (!added) {
+      added = true;
+      store.subscribe(late);
+    }
+  });
+  store.subscribe(() => seen.push("second"));
+
+  store.setVisible("commit", false);
+  assert.deepEqual(seen, ["first", "second"], "the late listener is not part of this delivery");
+
+  store.setVisible("push", false);
+  assert.deepEqual(
+    seen,
+    ["first", "second", "second", "late"],
+    "the removed listener is gone and the added listener hears later changes",
+  );
+});
+
 test("a throwing subscriber cannot break the toggle", () => {
   const kv = fakeKv();
   const store = createVisibilityStore({ kv });
@@ -204,6 +230,22 @@ test("a throwing kv write is reported instead of claiming success", () => {
   assert.equal(store.writes(), 0, "nothing was saved");
   assert.equal(store.ready, false);
   assert.equal(store.error().code, "save-failed");
+});
+
+test("a failed write takes precedence over a failed load in error()", () => {
+  const kv = {
+    get: () => {
+      throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    },
+    set: () => {
+      throw Object.assign(new Error("EROFS: read-only file system"), { code: "EROFS" });
+    },
+  };
+  const store = createVisibilityStore({ kv });
+  assert.equal(store.ready, false);
+  assert.equal(store.error().code, "read-failed", "the load failure is reported first");
+  assert.equal(store.setVisible("push", false), true, "the toggle still applies in memory");
+  assert.equal(store.error().code, "save-failed", "the unconfirmed write is the more urgent failure");
 });
 
 test("a rejected durable update is reported only once the host answers", async () => {
@@ -414,6 +456,13 @@ test("show all clears the durable value", async () => {
   await Promise.resolve();
   assert.deepEqual(storage.settings.hidden, []);
   assert.equal(store.isVisible("commit"), true);
+});
+
+test("a non-function subscriber still gets a callable disposer", () => {
+  const store = createVisibilityStore({ file: path.join(tempDir(), "visibility.json") });
+  const off = store.subscribe(null);
+  assert.equal(typeof off, "function", "callers never need to check the disposer");
+  assert.doesNotThrow(() => off());
 });
 
 test("the durable store wins over kv and the fallback file", async () => {

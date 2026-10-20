@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, 
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createProjectDetector, dialogKeyLayer, discoverActions } from "./runners.js";
+import { createGitActions } from "./git.js";
 import { PLUGIN_ID, setupWith } from "./tui.js";
 
 const roots = [];
@@ -101,6 +102,14 @@ function createContext({
   generateGate = null,
   generateMissing = false,
   generateMalformed = false,
+  providers = null,
+  models = null,
+  providerListMissing = false,
+  modelListMissing = false,
+  providerListThrows = false,
+  modelListThrows = false,
+  providerListGate = null,
+  modelListGate = null,
 }) {
   const calls = {
     slots: [],
@@ -114,6 +123,8 @@ function createContext({
     snapshots: [],
     prompts: [],
     generates: [],
+    providers: [],
+    models: [],
   };
   const context = {
     theme: {
@@ -149,6 +160,9 @@ function createContext({
           calls.dialogs.push({ clear: true });
         },
         async prompt(options) {
+          // Kept so a test can prove the commit flow never opens a host prompt:
+          // the host's prompt renderable is one line that wraps nothing, so the
+          // multi-line message is edited inside the dialog instead.
           calls.prompts.push(options);
           const answer = promptAnswers.shift();
           return typeof answer === "function" ? answer(options) : answer;
@@ -224,6 +238,34 @@ function createContext({
                     ? generateReply(payload, options)
                     : generateReply;
                 return { text: reply ?? "feat(web): tidy the header" };
+              },
+            },
+          }),
+      // Host provider/model metadata, as the installed `@opencode/client` V2
+      // exposes them: `provider.list()` / `model.list()` resolve
+      // `{ location, data }`. They are absent by default, which is the legacy
+      // host that cannot be probed and keeps the configured proxy generator.
+      ...(providerListMissing || providers == null
+        ? {}
+        : {
+            provider: {
+              async list(options) {
+                calls.providers.push(options);
+                if (providerListGate) await providerListGate(options);
+                if (providerListThrows) throw new Error("provider list failed");
+                return { location: { directory: locationDirectory }, data: providers };
+              },
+            },
+          }),
+      ...(modelListMissing || models == null
+        ? {}
+        : {
+            model: {
+              async list(options) {
+                calls.models.push(options);
+                if (modelListGate) await modelListGate(options);
+                if (modelListThrows) throw new Error("model list failed");
+                return { location: { directory: locationDirectory }, data: models };
               },
             },
           }),
@@ -351,6 +393,11 @@ function messageTurn(id, created) {
   return { id, type: "user", time: { created }, text: "" };
 }
 
+// Full object ids for the scripted repository: the service validates the
+// reviewed commit as a complete Git hash, not a label.
+const COMMIT_ONE = "1".repeat(40);
+const COMMIT_TWO = "2".repeat(40);
+
 // A scripted `git` so the real service runs end to end without a repository or a
 // network call. Every command is answered by shape, and anything unexpected —
 // including a non-git subprocess — fails the test loudly.
@@ -363,7 +410,7 @@ function fakeGit(options = {}) {
   const patch = options.patch ?? "diff --git a/src/a.ts b/src/a.ts\n+one line\n";
   const stat = options.stat ?? " src/a.ts | 1 +\n 1 file changed, 1 insertion(+)\n";
   const calls = [];
-  let head = options.head ?? "head1";
+  let head = options.head ?? COMMIT_ONE;
   let committedOnce = false;
   const ok = (stdout) => ({ ok: true, code: 0, spawnError: null, timedOut: false, stdout, stderr: "" });
   const bad = (code, stderr) => ({ ok: false, code, spawnError: null, timedOut: false, stdout: "", stderr });
@@ -377,7 +424,11 @@ function fakeGit(options = {}) {
       return ok(`${root}\n`);
     }
     if (line === "status --porcelain=v2 -z --untracked-files=all") return ok(status);
+    if (line === "--version") return ok(options.gitVersion ?? "git version 2.40.0\n");
+    if (line === "symbolic-ref --quiet HEAD") return ok(`refs/heads/${branch}\n`);
     if (line === "symbolic-ref --quiet --short HEAD") return ok(`${branch}\n`);
+    if (line === "rev-parse --git-path hooks") return ok(`${path.join(root, ".git", "hooks")}\n`);
+    if (line === "rev-parse --show-object-format") return ok("sha1\n");
     if (line === "rev-parse --verify --quiet HEAD") return ok(`${head}\n`);
     if (line === "rev-parse --abbrev-ref --symbolic-full-name @{upstream}") return ok(`${upstream}\n`);
     if (line === "rev-parse --abbrev-ref --symbolic-full-name @{push}") {
@@ -389,16 +440,30 @@ function fakeGit(options = {}) {
     if (line.startsWith("check-ref-format")) return ok("");
     if (line.startsWith("config --bool")) return bad(1, "");
     if (line.startsWith("remote get-url")) return ok(`${pushUrl}\n`);
+    if (line === "ls-files --stage -z") return ok(options.index ?? "index0\n");
     if (line === "write-tree") return ok(`${env?.GIT_INDEX_FILE ? "tree1" : "index1"}\n`);
     if (line.startsWith("read-tree")) return ok("");
     if (line.startsWith("add -A")) return ok("");
     if (line.startsWith("diff --cached --name-only")) return ok("");
-    if (line.startsWith("diff --cached") && line.includes("--patch")) return ok(patch);
+    if (line.startsWith("diff --cached") && line.includes("--patch")) {
+      if (options.previewThrows) throw new Error("review exploded with a private path");
+      if (options.previewGate) await options.previewGate();
+      return ok(patch);
+    }
     if (line.startsWith("diff --cached") && line.includes("--stat")) return ok(stat);
     if (line.startsWith("diff --quiet")) return ok("");
-    if (line.startsWith("commit -m")) {
-      head = options.headAfter ?? "head2";
+    if (line.includes("commit -m")) {
+      if (options.commitGate) await options.commitGate();
+      head = options.headAfter ?? COMMIT_TWO;
       committedOnce = true;
+      // The service reads the OID the reference-transaction guard recorded,
+      // not the mutable HEAD. The fake commit stands in for the hook here.
+      if (env?.GIT_INDEX_FILE) {
+        const guard = path.join(path.dirname(env.GIT_INDEX_FILE), "guard");
+        mkdirSync(guard, { recursive: true });
+        writeFileSync(path.join(guard, "prepared"), `${head}\n`);
+        writeFileSync(path.join(guard, "committed"), `${head}\n`);
+      }
       return ok("");
     }
     if (line.includes("^{tree}")) {
@@ -408,13 +473,24 @@ function fakeGit(options = {}) {
       return ok(`${tree}\n`);
     }
     if (line.startsWith("reset -q")) return ok("");
-    if (line.includes(" push ")) return ok("To github.com:acme/repo.git\n   head1..head2  HEAD -> main\n");
+    if (line.includes(" push ")) {
+      if (options.pushGate) await options.pushGate();
+      return ok("To github.com:acme/repo.git\n   head1..head2  HEAD -> main\n");
+    }
     return bad(1, `unexpected git command: ${line}`);
   };
 
   exec.calls = calls;
   exec.commands = () => calls.map((call) => call.args.join(" "));
   return exec;
+}
+
+// The service prefixes guarded commands with command-scoped `-c` options. Tests
+// assert on the subcommand itself, so the leading config pairs are sliced off.
+function gitSubcommands(exec, name) {
+  return exec.calls
+    .filter((call) => call.args.includes(name))
+    .map((call) => call.args.slice(call.args.indexOf(name)).join(" "));
 }
 
 // The real manager signals the run's own process group; the fake spawn supplies
@@ -992,6 +1068,14 @@ test("a stop request for a runner that is gone is explained", async () => {
 
   // A live runner is stopped once; the second request is answered, not ignored.
   const started = runtime.startAction("build-mobile");
+  // Keep the fake child alive so the repeated-request path is observable; a
+  // synchronous exit would correctly resolve the stop to "stopped" already.
+  const child = spawn.calls[0].child;
+  child.kill = (signal) => {
+    child.signals.push(signal);
+    if (signal === "SIGKILL") child.emit("exit", null, signal);
+    return true;
+  };
   assert.equal(runtime.requestStop(started.key), true);
   assert.equal(runtime.requestStop(started.key), false);
   assert.match(calls.toasts.at(-1).message, /already stopping/);
@@ -1020,6 +1104,256 @@ test("a failing child stays visible with its exit code", async () => {
   assert.equal(row.run.exitCode, 2);
 
   await cleanup();
+});
+
+test("cleanup closes an owned log dialog before disposing its runs", async () => {
+  const root = scriptsFixture();
+  const { context, calls } = createContext({
+    locationDirectory: root,
+    sessions: { s1: { directory: root } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+  });
+  const spawn = createFakeSpawn();
+  const cleanup = await startPlugin(context, view, { spawn, notifyMs: 0 });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+
+  const { key } = runtime.startAction("mobile-live");
+  assert.ok(calls.dialogs.some((entry) => typeof entry.render === "function"));
+  await cleanup();
+
+  assert.deepEqual(calls.dialogs.at(-1), { clear: true });
+  assert.equal(runtime.snapshot(key), undefined);
+});
+
+test("cleanup leaves a dialog that replaced the log dialog untouched", async () => {
+  const root = scriptsFixture();
+  const { context, calls } = createContext({
+    locationDirectory: root,
+    sessions: { s1: { directory: root } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+  });
+  const spawn = createFakeSpawn();
+  const cleanup = await startPlugin(context, view, { spawn, notifyMs: 0 });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+
+  runtime.startAction("mobile-live");
+  assert.equal(runtime.openSettings(), true);
+  await cleanup();
+
+  assert.equal(calls.dialogs.filter((entry) => entry.clear).length, 0);
+});
+
+test("a stale log close callback cannot clear its replacement dialog", async () => {
+  const root = scriptsFixture();
+  const { context, calls } = createContext({
+    locationDirectory: root,
+    sessions: { s1: { directory: root } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+  });
+  const spawn = createFakeSpawn();
+  const cleanup = await startPlugin(context, view, { spawn, notifyMs: 0 });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+
+  const { key } = runtime.startAction("mobile-live");
+  const first = calls.dialogs.find((entry) => typeof entry.render === "function");
+  assert.equal(runtime.openLog(key), true);
+  const last = calls.dialogs.filter((entry) => typeof entry.render === "function").at(-1);
+
+  first.onClose();
+  await cleanup();
+
+  assert.notEqual(first, last);
+  assert.equal(calls.dialogs.filter((entry) => entry.clear).length, 1);
+});
+
+test("cleanup leaves a mounted Git flow after a cosmetic size failure", async () => {
+  const root = scriptsFixture();
+  const { context, calls } = createContext({
+    locationDirectory: root,
+    sessions: { s1: { directory: root } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+  });
+  const git = {
+    // The status read never settles: this test only cares that the Git dialog
+    // mounted, not how its asynchronous preload finishes.
+    status: () => new Promise(() => {}),
+    preview: async () => ({ ok: false, error: { code: "no-selection", message: "No files were selected" } }),
+  };
+  const cleanup = await startPlugin(context, view, { spawn: createFakeSpawn(), notifyMs: 0, git });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const dialog = context.ui.dialog;
+  const set = dialog.set;
+  let failSize = false;
+  dialog.set = (options) => {
+    if (failSize) throw new Error("cosmetic resize failed");
+    set(options);
+  };
+
+  const { key } = runtime.startAction("mobile-live");
+  assert.equal(runtime.openLog(key), true);
+  failSize = true;
+  assert.equal(runtime.openGit("commit").ok, true);
+  failSize = false;
+
+  // The Git mount succeeded before the cosmetic resize threw, so it owns the
+  // slot: exit cleanup must not clear it as if the old log were still open.
+  assert.equal(runtime.disposeLogs(), false);
+  await cleanup();
+  assert.equal(calls.dialogs.filter((entry) => entry.clear).length, 0);
+});
+
+test("replace/setSize keeps log ownership through stale and current closes", async () => {
+  const root = scriptsFixture();
+  const { context, calls } = createContext({
+    locationDirectory: root,
+    sessions: { s1: { directory: root } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+  });
+  const dialog = context.ui.dialog;
+  const replaced = [];
+  const sizes = [];
+  dialog.replace = (render, onClose) => replaced.push({ render, onClose });
+  dialog.setSize = (size) => sizes.push(size);
+  dialog.show = () => {
+    throw new Error("the replace path must win");
+  };
+  const cleanup = await startPlugin(context, view, { spawn: createFakeSpawn(), notifyMs: 0 });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const { key } = runtime.startAction("mobile-live");
+
+  assert.equal(runtime.openLog(key), true);
+  assert.equal(replaced.length, 2);
+  assert.deepEqual(sizes, ["large", "large"]);
+  const [first, second] = replaced;
+
+  first.onClose();
+  assert.equal(runtime.disposeLogs(), true, "a stale close leaves the newer dialog owned");
+  assert.equal(calls.dialogs.filter((entry) => entry.clear).length, 1);
+
+  assert.equal(runtime.openLog(key), true);
+  const third = replaced.at(-1);
+  third.onClose();
+  assert.equal(runtime.disposeLogs(), false, "the current close releases ownership");
+  assert.notEqual(second, third);
+  await cleanup();
+  assert.equal(calls.dialogs.filter((entry) => entry.clear).length, 1);
+});
+
+test("the process exit listener disposes the manager synchronously", async () => {
+  const root = scriptsFixture();
+  const { context, calls } = createContext({
+    locationDirectory: root,
+    sessions: { s1: { directory: root } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+  });
+  const before = new Set(process.listeners("exit"));
+  const spawn = createFakeSpawn();
+  const cleanup = await startPlugin(context, view, { spawn, notifyMs: 0 });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const onExit = process.listeners("exit").find((listener) => !before.has(listener));
+  assert.equal(typeof onExit, "function");
+
+  runtime.startAction("mobile-live");
+  const child = spawn.calls[0].child;
+  onExit();
+
+  assert.deepEqual(child.signals, ["SIGTERM"]);
+  assert.equal(runtime.manager.list().length, 0);
+  await cleanup();
+});
+
+test("the process exit listener SIGKILLs a stubborn owned group before returning", async () => {
+  const root = scriptsFixture();
+  const { context, calls } = createContext({
+    locationDirectory: root,
+    sessions: { s1: { directory: root } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+  });
+  const before = new Set(process.listeners("exit"));
+  const spawn = createFakeSpawn();
+  const cleanup = await startPlugin(context, view, {
+    spawn,
+    notifyMs: 0,
+    readProcessStat: () => undefined,
+    probeGroup: () => true,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const onExit = process.listeners("exit").find((listener) => !before.has(listener));
+  assert.equal(typeof onExit, "function");
+
+  runtime.startAction("mobile-live");
+  const child = spawn.calls[0].child;
+  // Stubborn group: SIGTERM is recorded but never exits. Only the synchronous
+  // exit-path SIGKILL may finish it.
+  child.kill = (signal) => {
+    child.signals.push(signal);
+    if (signal === "SIGKILL") child.emit("exit", null, signal);
+    return true;
+  };
+
+  onExit();
+
+  assert.deepEqual(child.signals, ["SIGTERM", "SIGKILL"]);
+  assert.equal(runtime.manager.list().length, 0);
+  await cleanup();
+});
+
+test("the process exit listener SIGKILLs an already-stopping owned group", async () => {
+  const root = scriptsFixture();
+  const { context, calls } = createContext({
+    locationDirectory: root,
+    sessions: { s1: { directory: root } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+  });
+  const before = new Set(process.listeners("exit"));
+  const spawn = createFakeSpawn();
+  const cleanup = await startPlugin(context, view, {
+    spawn,
+    notifyMs: 0,
+    killGraceMs: 60_000,
+    readProcessStat: () => undefined,
+    probeGroup: () => true,
+  });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const onExit = process.listeners("exit").find((listener) => !before.has(listener));
+  assert.equal(typeof onExit, "function");
+
+  const { key } = runtime.startAction("mobile-live");
+  const child = spawn.calls[0].child;
+  child.kill = (signal) => {
+    child.signals.push(signal);
+    if (signal === "SIGKILL") child.emit("exit", null, signal);
+    return true;
+  };
+  assert.equal(runtime.stop(key), true);
+  assert.equal(runtime.snapshot(key).stopping, true);
+
+  onExit();
+
+  assert.deepEqual(child.signals, ["SIGTERM", "SIGKILL"]);
+  assert.equal(runtime.manager.list().length, 0);
+  await cleanup();
+});
+
+test("a log close from the view releases ownership before cleanup", async () => {
+  const root = scriptsFixture();
+  const { context, calls } = createContext({
+    locationDirectory: root,
+    sessions: { s1: { directory: root } },
+    route: () => ({ type: "session", sessionID: "s1" }),
+  });
+  const spawn = createFakeSpawn();
+  const cleanup = await startPlugin(context, view, { spawn, notifyMs: 0 });
+  const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+
+  runtime.startAction("mobile-live");
+  const dialog = calls.dialogs.find((entry) => typeof entry.render === "function");
+  const props = dialog.render().props;
+  assert.equal(typeof props.onClose, "function");
+  props.onClose();
+  await cleanup();
+
+  assert.equal(calls.dialogs.filter((entry) => entry.clear).length, 0);
 });
 
 test("cleanup stops owned children and leaves no exit listener", async () => {
@@ -1175,8 +1509,16 @@ test("the git dialog drives both flows through the runtime, never through git", 
   // Commit steps.
   assert.match(dialog, /step\("files"\)/);
   assert.match(dialog, /step\("preview"\)/);
-  assert.match(dialog, /step\("egress"\)/);
   assert.match(dialog, /step\("confirm"\)/);
+  // The message editor is a step of this dialog, never a host prompt: the
+  // subject, the blank line and the body have to survive the edit.
+  assert.match(dialog, /step\("edit"\)/);
+  assert.match(dialog, /state\(\)\.draft/);
+  assert.match(dialog, /flow\.draftChanged\?\.\(value\)/);
+  assert.match(dialog, /flow\.saveMessage\?\.\(\)/);
+  assert.match(dialog, /flow\.cancelMessage\?\.\(\)/);
+  assert.match(dialog, /label="Save message"/);
+  assert.match(dialog, /flow\.editMessage\(\)/);
   assert.match(dialog, /step\("blocked"\)/);
   // A commit that already exists ends the flow: the hash is shown and the only
   // control left is Close.
@@ -1200,8 +1542,19 @@ test("the git dialog drives both flows through the runtime, never through git", 
   // Every control goes through the runtime API.
   assert.match(dialog, /flow\.toggle\(file\.path\)/);
   assert.match(dialog, /flow\.previewSelection\(\)/);
-  assert.match(dialog, /flow\.askEgress\(\)/);
+  assert.equal(
+    (dialog.match(/flow\.previewSelection\(\)/g) ?? []).length,
+    1,
+    "one Continue action starts the review",
+  );
+  assert.match(dialog, /disabled=\{!state\(\)\?\.generator \|\| busy\(\)\}/);
   assert.match(dialog, /flow\.approveEgress\(\)/);
+  assert.equal(
+    (dialog.match(/flow\.approveEgress\(\)/g) ?? []).length,
+    1,
+    "Generate message is the one egress action",
+  );
+  assert.doesNotMatch(dialog, /Send diff to|askEgress/);
   assert.match(dialog, /flow\.editMessage\(\)/);
   assert.match(dialog, /flow\.confirm\(\)/);
   assert.match(dialog, /flow\.confirmPush\(\)/);
@@ -1225,6 +1578,40 @@ test("the git dialog drives both flows through the runtime, never through git", 
   assert.doesNotMatch(dialog, /from "\.\/git\.js"/);
   assert.doesNotMatch(dialog, /execFile|child_process|spawn|fetch\(|copilotBin|buildCopilotArgs/);
   assert.doesNotMatch(dialog, /dialog\.(show|set|clear|prompt)/);
+});
+
+test("the commit message editor is a real multi-line field with an explicit save", () => {
+  const source = readFileSync(new URL("./view.jsx", import.meta.url), "utf8");
+  const editor = functionBody(source, "function MessageEditor");
+  const dialog = functionBody(source, "export function GitDialog");
+
+  // A textarea, not a one-line input: the field wraps and scrolls, and it starts
+  // from the draft the flow holds rather than keeping a second copy.
+  assert.match(editor, /<textarea/);
+  assert.doesNotMatch(editor, /<input/);
+  assert.match(editor, /initialValue=\{initial\}/);
+  assert.match(editor, /wrapMode="word"/);
+  // The field fills the body instead of pinning six rows; the dialog footer
+  // keeps its own row and the diff no longer shares the edit screen.
+  assert.match(editor, /flexGrow=\{1\}/);
+  assert.match(editor, /minHeight=\{4\}/);
+  assert.doesNotMatch(editor, /height=\{6\}/);
+  assert.match(editor, /onContentChange=\{\(value\) => \{ report\(value\); refreshPosition\(\); \}\}/);
+  assert.match(editor, /field\?\.plainText/, "a content event is read back as text");
+  assert.match(editor, /onSubmit=\{\(\) => props\.onSave\?\.\(\)\}/);
+
+  // Enter keeps typing a new line. Alt+Enter saves on the host binding, and
+  // Ctrl+Enter saves too where the terminal reports it separately from Return.
+  assert.match(
+    source,
+    /const EDIT_SAVE_KEYS = \[\{ name: "return", ctrl: true, action: "submit" \}\]/,
+  );
+  assert.match(dialog, /Alt\+Enter saves/, "the field says how to save");
+
+  // Saving and cancelling are the two explicit controls, and neither commits.
+  assert.match(dialog, /label="Save message"/);
+  assert.match(dialog, /label="Cancel"/);
+  assert.doesNotMatch(dialog, /dialog\.prompt/);
 });
 
 test("the section header collapses the rows without touching a run", () => {
@@ -1492,7 +1879,7 @@ test("the dialog's s key stops through the stop path, never as input", async () 
 
   assert.equal(stop.run(), true);
   assert.deepEqual(child.writes, [], "s is never written to the child's input");
-  assert.equal(runtime.snapshot(key).stopping, true, "the stop path ran");
+  assert.equal(runtime.snapshot(key).status, "stopped", "the stop path ran");
   assert.deepEqual(child.signals, ["SIGTERM"], "the group is signalled, not typed at");
 
   dispose();
@@ -1647,7 +2034,6 @@ test("the commit flow reviews the exact patch before anything is written", async
     sessions: { s1: { directory: dir } },
     route: () => ({ type: "session", sessionID: "s1" }),
     diffFiles: { s1: ["src/a.ts"] },
-    promptAnswers: ["tidy the header"],
   });
   const cleanup = await startPlugin(context, view, {
     spawn: createFakeSpawn(),
@@ -1696,41 +2082,51 @@ test("the commit flow reviews the exact patch before anything is written", async
   assert.equal(flow.state().preview.diff, "diff --git a/src/a.ts b/src/a.ts\n+one line\n");
   assert.match(flow.state().preview.stat, /1 file changed/);
   assert.equal(
-    exec.commands().some((line) => line.startsWith("commit")),
+    gitSubcommands(exec, "commit").length > 0,
     false,
     "the review writes nothing",
   );
 
-  // The egress step is the only place the diff leaves the machine, and it needs
-  // its own confirmation: the API cannot generate straight from the review.
-  assert.equal(await flow.approveEgress(), null);
+  // The review resolves the destination first. Its Generate message action is
+  // the only approval, and the API cannot generate straight from the review.
   assert.equal(flow.state().step, "preview");
+  assert.equal(flow.state().generator?.providerName, "OpenCodex");
+  assert.equal(
+    flow.state().generator?.verified,
+    false,
+    "a host without provider/model lists marks the fixed default as assumed",
+  );
+  assert.equal(
+    calls.generates.length,
+    0,
+    "reading the review and its metadata never sends the diff",
+  );
   assert.equal(
     exec.calls.filter((call) => call.file !== "git").length,
     0,
     "the review step never sends the diff",
   );
 
-  assert.equal(flow.askEgress(), true);
-  assert.equal(flow.state().step, "egress");
   await flow.approveEgress();
-  await until(() => calls.prompts.length === 1, "the message prompt");
-  assert.equal(calls.prompts[0].title, "Commit message");
+  // The generated message opens the dialog's own editor. The host prompt is gone,
+  // so nothing collapses the subject, the blank line and the body into one line.
+  await until(() => flow.state()?.step === "edit", "the message editor");
+  assert.equal(calls.prompts.length, 0, "no host prompt is opened");
   // The model's raw suggestion carries a Conventional Commit prefix, which is
   // stripped before the user reviews it; the confirmed text is what commits.
-  assert.equal(calls.prompts[0].value, "tidy the header");
-  // The prompt is a plain descriptive subject and never models a type prefix.
-  const prompt = calls.prompts[0];
-  for (const field of ["title", "description", "placeholder", "value"]) {
+  assert.equal(flow.state().message, "tidy the header");
+  assert.equal(flow.state().draft, "tidy the header", "the editor opens on the draft");
+  // The draft is a plain descriptive subject and never models a type prefix.
+  for (const field of [flow.state().message, flow.state().draft]) {
     assert.equal(
       /(?:^|\s)(?:feat|fix|chore|docs|style|refactor|perf|test|build|ci|revert)(?:\([^)]*\))?!?:/i.test(
-        prompt[field] ?? "",
+        field ?? "",
       ),
       false,
-      `no Conventional Commit prefix in the prompt ${field}`,
+      "no Conventional Commit prefix in the draft",
     );
   }
-  assert.match(prompt.description, /as-is/i, "the draft stays editable");
+  assert.equal(flow.saveMessage(), "tidy the header");
   assert.equal(flow.state().step, "confirm");
   assert.equal(flow.state().message, "tidy the header");
 
@@ -1749,18 +2145,18 @@ test("the commit flow reviews the exact patch before anything is written", async
 
   await flow.confirm();
   await until(() => flow.state() === null, "the dialog to close");
-  const committed = exec.commands().find((line) => line.startsWith("commit -m"));
+  const committed = gitSubcommands(exec, "commit").find((line) => line.startsWith("commit -m"));
   assert.equal(committed, "commit -m tidy the header");
   assert.equal(committed.includes("--no-verify"), false, "hooks are never skipped");
-  assert.equal(calls.toasts.at(-1).message, "Committed 1 file · head2");
+  assert.equal(calls.toasts.at(-1).message, `Committed 1 file · ${COMMIT_TWO.slice(0, 12)}`);
   assert.equal(calls.dialogs.at(-1).clear, true);
 
   await cleanup();
 });
 
 // Mount a session's commit flow on a scripted git and an injected native
-// generator, stopping at the egress step so a test can approve it and inspect
-// exactly what left the machine.
+// generator. The preview performs the metadata preflight and stops on the
+// review, where one Generate message action sends the frozen diff.
 async function startCommitFlow(options = {}) {
   const dir = options.dir ?? scriptsFixture();
   const tmpRoot = options.tmpRoot ?? path.join(dir, "git-tmp");
@@ -1776,6 +2172,7 @@ async function startCommitFlow(options = {}) {
   const cleanup = await startPlugin(context, view, {
     spawn: createFakeSpawn(),
     notifyMs: 0,
+    ...(options.service ? { git: options.service } : {}),
     gitOptions: { exec, tmpRoot },
     detectTtlMs: 0,
   });
@@ -1783,8 +2180,7 @@ async function startCommitFlow(options = {}) {
   const flow = runtime.commitFlow;
   runtime.openGit("commit");
   await until(() => flow.state()?.step === "files", "the file list");
-  await flow.previewSelection();
-  flow.askEgress();
+  if (!options.skipPreview) await flow.previewSelection();
   return { dir, tmpRoot, exec, context, calls, runtime, flow, cleanup };
 }
 
@@ -1804,8 +2200,8 @@ test("the commit message is written by native Luna while the flow says it is bus
 
   // The status line names the model and no prompt opens before it answers.
   assert.equal(flow.state().busy, "generating with Luna");
-  assert.equal(calls.prompts.length, 0, "no message is shown before the model answers");
-  assert.equal(flow.state().step, "egress", "the flow is still on the egress step");
+  assert.equal(flow.state().message, "", "no message is offered before the model answers");
+  assert.equal(flow.state().step, "preview", "the flow is still on the preview step");
 
   const [{ payload, options }] = calls.generates;
   assert.deepEqual(payload.model, { providerID: "opencodex", id: "gpt-6-luna", variant: "low" });
@@ -1820,9 +2216,9 @@ test("the commit message is written by native Luna while the flow says it is bus
 
   release();
   await running;
-  await until(() => calls.prompts.length === 1, "the message prompt");
+  await until(() => flow.state()?.step === "edit", "the message editor");
   assert.equal(flow.state().busy, "");
-  assert.equal(calls.prompts[0].value, "tidy the header", "the review prefix was stripped");
+  assert.equal(flow.state().draft, "tidy the header", "the review prefix was stripped");
 
   flow.cancel();
   await flowTest.cleanup();
@@ -1850,6 +2246,754 @@ test("a failed generation is named and leaves the review usable", async () => {
   await flowTest.cleanup();
 });
 
+test("one Generate action sends once and a repeated press while busy is a no-op", async () => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const flowTest = await startCommitFlow({
+    context: { generateGate: () => gate },
+  });
+  const { calls, flow } = flowTest;
+
+  const running = flow.approveEgress();
+  await until(() => calls.generates.length === 1, "the native generation call");
+  assert.equal(flow.state().step, "preview");
+  assert.equal(await flow.approveEgress(), null, "the second press is ignored while busy");
+  assert.equal(calls.generates.length, 1, "one press sends one generation");
+
+  release();
+  await running;
+  await until(() => flow.state()?.step === "edit", "the message editor");
+  assert.equal(calls.generates.length, 1, "no second call after the answer");
+  flow.cancel();
+  await flowTest.cleanup();
+});
+
+test("a cancelled generation ignores its late answer instead of editing a dead flow", async () => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const flowTest = await startCommitFlow({
+    context: { generateGate: () => gate },
+  });
+  const { calls, flow } = flowTest;
+
+  const running = flow.approveEgress();
+  await until(() => calls.generates.length === 1, "the native generation call");
+  flow.cancel();
+  assert.equal(flow.state(), null);
+
+  release();
+  assert.equal(await running, null);
+  assert.equal(flow.state(), null, "a late message must not reopen the cancelled flow");
+  assert.equal(calls.generates.length, 1, "the cancelled attempt was not repeated");
+
+  await flowTest.cleanup();
+});
+
+test("a review frozen while the flow is cancelled is discarded, not leaked", async () => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const dir = scriptsFixture();
+  const tmpRoot = path.join(dir, "git-tmp");
+  const exec = fakeGit({
+    root: dir,
+    status: "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0",
+    previewGate: () => gate,
+  });
+  const service = createGitActions({
+    exec,
+    tmpRoot,
+    generateText: async () => ({ text: "tidy the header" }),
+  });
+  const discarded = [];
+  const baseDiscard = service.discard;
+  service.discard = (input) => {
+    discarded.push(input?.token);
+    return baseDiscard(input);
+  };
+  const flowTest = await startCommitFlow({ dir, tmpRoot, exec, service, skipPreview: true });
+  const { flow } = flowTest;
+
+  const pending = flow.previewSelection();
+  await until(
+    () => exec.commands().some((line) => line.startsWith("diff --cached") && line.includes("--patch")),
+    "git freezing the review",
+  );
+  flow.cancel();
+  assert.equal(flow.state(), null);
+
+  release();
+  assert.equal(await pending, null);
+  assert.deepEqual(discarded.length, 1, "the review frozen after the cancel is discarded once");
+  assert.ok(discarded[0], "the discarded token is the frozen review's token");
+
+  await flowTest.cleanup();
+});
+
+test("a replacement review discards the earlier frozen token", async () => {
+  const dir = scriptsFixture();
+  const tmpRoot = path.join(dir, "git-tmp");
+  const exec = fakeGit({
+    root: dir,
+    status: "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0",
+  });
+  const service = createGitActions({
+    exec,
+    tmpRoot,
+    generateText: async () => ({ text: "tidy the header" }),
+  });
+  const discarded = [];
+  const baseDiscard = service.discard;
+  service.discard = (input) => {
+    discarded.push(input?.token);
+    return baseDiscard(input);
+  };
+  const flowTest = await startCommitFlow({ dir, tmpRoot, exec, service });
+  const { flow } = flowTest;
+
+  const first = flow.state().preview.token;
+  assert.ok(first, "the first review has a token");
+  await flow.previewSelection();
+  assert.equal(flow.state().step, "preview");
+  assert.deepEqual(discarded, [first], "the replaced review is discarded exactly once");
+
+  flow.cancel();
+  await flowTest.cleanup();
+});
+
+test("closing the dialog during a commit defers cleanup and still reports the commit once", async () => {
+  const dir = scriptsFixture();
+  const tmpRoot = path.join(dir, "git-tmp");
+  let reachedCommit;
+  const commitReached = new Promise((resolve) => {
+    reachedCommit = resolve;
+  });
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const exec = fakeGit({
+    root: dir,
+    status: "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0",
+    commitGate: async () => {
+      reachedCommit();
+      await gate;
+    },
+  });
+  const service = createGitActions({
+    exec,
+    tmpRoot,
+    generateText: async () => ({ text: "tidy the header" }),
+  });
+  const discarded = [];
+  const baseDiscard = service.discard;
+  service.discard = (input) => {
+    discarded.push(input?.token);
+    return baseDiscard(input);
+  };
+  const flowTest = await startCommitFlow({ dir, tmpRoot, exec, service });
+  const { flow, calls } = flowTest;
+  const token = flow.state().preview.token;
+
+  await flow.editMessage();
+  await flow.saveMessage("tidy the header");
+  assert.equal(flow.state().step, "confirm");
+
+  const running = flow.confirm();
+  await commitReached;
+  assert.equal(flow.state().busy, "committing the selected files");
+
+  flow.cancel();
+  assert.equal(flow.state(), null);
+  assert.deepEqual(discarded, [], "a running commit keeps its token and private index");
+  assert.equal(readdirSync(tmpRoot).length, 1, "the private review directory is untouched");
+
+  release();
+  const result = await running;
+  assert.equal(result.ok, true, JSON.stringify(result.error));
+  assert.deepEqual(discarded, [token], "the closed flow discards its token exactly once after settle");
+  assert.equal(flow.state(), null, "the closed flow is not resurrected");
+  assert.equal(calls.toasts.filter((toast) => toast.message.startsWith("Committed")).length, 1);
+  assert.equal(calls.toasts.at(-1).message, `Committed 1 file · ${COMMIT_TWO.slice(0, 12)}`);
+  assert.equal(calls.toasts.at(-1).variant, "info");
+  assert.equal(readdirSync(tmpRoot).length, 0, "the review directory is removed after settle");
+  assert.equal(gitSubcommands(exec, "commit").filter((line) => line.startsWith("commit -m")).length, 1);
+
+  await flowTest.cleanup();
+});
+
+test("closing the dialog during a push defers cleanup and still reports the push once", async () => {
+  const dir = scriptsFixture();
+  const tmpRoot = path.join(dir, "git-tmp");
+  let reachedPush;
+  const pushReached = new Promise((resolve) => {
+    reachedPush = resolve;
+  });
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const exec = fakeGit({
+    root: dir,
+    pushGate: async () => {
+      reachedPush();
+      await gate;
+    },
+  });
+  const service = createGitActions({
+    exec,
+    tmpRoot,
+    generateText: async () => ({ text: "tidy the header" }),
+  });
+  const discarded = [];
+  const baseDiscard = service.discard;
+  service.discard = (input) => {
+    discarded.push(input?.token);
+    return baseDiscard(input);
+  };
+  const flowTest = await startCommitFlow({ dir, tmpRoot, exec, service, skipPreview: true });
+  const { flow, calls, runtime } = flowTest;
+  flow.cancel();
+
+  assert.equal(runtime.openGit("push").ok, true);
+  await until(() => flow.state()?.step === "push-review", "the push review");
+  assert.equal(flow.confirmPush(), true);
+
+  const running = flow.pushNow();
+  await pushReached;
+  const token = service.active()?.token;
+  assert.equal(typeof token, "string");
+  assert.equal(flow.state().busy, "pushing");
+  flow.cancel();
+  assert.equal(flow.state(), null);
+  assert.deepEqual(discarded, [], "a running push keeps its token");
+
+  release();
+  const result = await running;
+  assert.equal(result.ok, true, JSON.stringify(result.error));
+  assert.deepEqual(discarded, [token], "the closed flow discards its push token exactly once after settle");
+  assert.equal(flow.state(), null, "the closed push flow is not resurrected");
+  assert.equal(calls.toasts.filter((toast) => toast.message.startsWith("Pushed")).length, 1);
+  assert.equal(calls.toasts.at(-1).message, "Pushed main to origin/main");
+  assert.equal(calls.toasts.at(-1).variant, "info");
+  assert.equal(exec.commands().filter((line) => line.includes(" push ")).length, 1);
+
+  await flowTest.cleanup();
+});
+
+test("closing a push flow while the preview is pending discards the late token once", async () => {
+  const dir = scriptsFixture();
+  const tmpRoot = path.join(dir, "git-tmp");
+  const exec = fakeGit({ root: dir });
+  const service = createGitActions({
+    exec,
+    tmpRoot,
+    generateText: async () => ({ text: "tidy the header" }),
+  });
+  const discarded = [];
+  const baseDiscard = service.discard;
+  service.discard = (input) => {
+    discarded.push(input?.token);
+    return baseDiscard(input);
+  };
+  let reachedPreview;
+  const previewReached = new Promise((resolve) => {
+    reachedPreview = resolve;
+  });
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  let late;
+  const basePreviewPush = service.previewPush;
+  service.previewPush = async (input) => {
+    reachedPreview();
+    await gate;
+    late = await basePreviewPush(input);
+    return late;
+  };
+  const flowTest = await startCommitFlow({ dir, tmpRoot, exec, service, skipPreview: true });
+  const { flow, runtime } = flowTest;
+  flow.cancel();
+
+  assert.equal(runtime.openGit("push").ok, true);
+  await previewReached;
+  flow.cancel();
+  assert.equal(flow.state(), null);
+  assert.deepEqual(discarded, [], "no push token exists until the preview resolves");
+
+  release();
+  await until(() => discarded.length === 1, "the late push token discard");
+  assert.equal(discarded[0], late.token, "the token created after cancellation is discarded");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(discarded, [late.token], "the late token is discarded exactly once");
+  assert.equal(flow.state(), null, "the closed push flow is not resurrected");
+
+  await flowTest.cleanup();
+});
+
+test("a commit failure after dialog close reports the hash once and discards the token", async () => {
+  const dir = scriptsFixture();
+  const tmpRoot = path.join(dir, "git-tmp");
+  const exec = fakeGit({
+    root: dir,
+    status: "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0",
+  });
+  const service = createGitActions({
+    exec,
+    tmpRoot,
+    generateText: async () => ({ text: "tidy the header" }),
+  });
+  const discarded = [];
+  const baseDiscard = service.discard;
+  service.discard = (input) => {
+    discarded.push(input?.token);
+    return baseDiscard(input);
+  };
+  const flowTest = await startCommitFlow({ dir, tmpRoot, exec, service });
+  const { flow, calls } = flowTest;
+  const token = flow.state().preview.token;
+  await flow.editMessage();
+  await flow.saveMessage("tidy the header");
+
+  let reachedCommit;
+  const commitReached = new Promise((resolve) => {
+    reachedCommit = resolve;
+  });
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  service.commit = async () => {
+    reachedCommit();
+    await gate;
+    return {
+      ok: false,
+      error: { code: "reconcile-failed", hash: "abc123def456", message: "the index moved" },
+    };
+  };
+
+  const running = flow.confirm();
+  await commitReached;
+  flow.cancel();
+  assert.equal(flow.state(), null);
+  assert.deepEqual(discarded, []);
+
+  release();
+  const result = await running;
+  assert.equal(result.ok, false);
+  assert.equal(result.error.hash, "abc123def456");
+  assert.deepEqual(discarded, [token], "the closed flow releases its token once");
+  assert.equal(flow.state(), null);
+  assert.equal(calls.toasts.filter((toast) => toast.message === "Commit exists as abc123def456 — do not retry").length, 1);
+  assert.equal(calls.toasts.at(-1).variant, "error");
+
+  await flowTest.cleanup();
+});
+
+test("a push failure after dialog close reports the error once and discards the token", async () => {
+  const dir = scriptsFixture();
+  const tmpRoot = path.join(dir, "git-tmp");
+  const exec = fakeGit({ root: dir });
+  const service = createGitActions({
+    exec,
+    tmpRoot,
+    generateText: async () => ({ text: "tidy the header" }),
+  });
+  const discarded = [];
+  const baseDiscard = service.discard;
+  service.discard = (input) => {
+    discarded.push(input?.token);
+    return baseDiscard(input);
+  };
+  const flowTest = await startCommitFlow({ dir, tmpRoot, exec, service, skipPreview: true });
+  const { flow, calls, runtime } = flowTest;
+  flow.cancel();
+  assert.equal(runtime.openGit("push").ok, true);
+  await until(() => flow.state()?.step === "push-review", "the push review");
+  assert.equal(flow.confirmPush(), true);
+
+  let reachedPush;
+  const pushReached = new Promise((resolve) => {
+    reachedPush = resolve;
+  });
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  let attemptedToken;
+  service.push = async (input) => {
+    attemptedToken = input.token;
+    reachedPush();
+    await gate;
+    return { ok: false, error: { code: "push-failed", message: "Push denied by remote" } };
+  };
+
+  const running = flow.pushNow();
+  await pushReached;
+  flow.cancel();
+  assert.equal(flow.state(), null);
+  assert.deepEqual(discarded, []);
+
+  release();
+  const result = await running;
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "push-failed");
+  assert.deepEqual(discarded, [attemptedToken], "the closed flow releases its push token once");
+  assert.equal(flow.state(), null);
+  assert.equal(calls.toasts.filter((toast) => toast.message === "Push: Push denied by remote").length, 1);
+  assert.equal(calls.toasts.at(-1).variant, "error");
+
+  await flowTest.cleanup();
+});
+
+test("a rejecting commit service cannot leak its error or bypass closed-flow cleanup", async () => {
+  const dir = scriptsFixture();
+  const tmpRoot = path.join(dir, "git-tmp");
+  const exec = fakeGit({
+    root: dir,
+    status: "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0",
+  });
+  const service = createGitActions({
+    exec,
+    tmpRoot,
+    generateText: async () => ({ text: "tidy the header" }),
+  });
+  const discarded = [];
+  const baseDiscard = service.discard;
+  service.discard = (input) => {
+    discarded.push(input?.token);
+    return baseDiscard(input);
+  };
+  const flowTest = await startCommitFlow({ dir, tmpRoot, exec, service });
+  const { flow, calls } = flowTest;
+  const token = flow.state().preview.token;
+  await flow.editMessage();
+  await flow.saveMessage("tidy the header");
+
+  let reachedCommit;
+  const commitReached = new Promise((resolve) => {
+    reachedCommit = resolve;
+  });
+  let rejectCommit;
+  const gate = new Promise((_, reject) => {
+    rejectCommit = reject;
+  });
+  service.commit = async () => {
+    reachedCommit();
+    await gate;
+  };
+
+  const running = flow.confirm();
+  await commitReached;
+  flow.cancel();
+  rejectCommit(new Error("private path /tmp/secret-index"));
+  const result = await running;
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "commit-failed");
+  assert.match(result.error.message, /outcome is unknown/);
+  assert.equal(JSON.stringify(result).includes("secret-index"), false);
+  assert.equal(JSON.stringify(calls.toasts).includes("secret-index"), false);
+  assert.deepEqual(discarded, [token]);
+  assert.equal(flow.state(), null);
+  assert.equal(calls.toasts.filter((toast) => toast.message.includes("outcome is unknown")).length, 1);
+
+  await flowTest.cleanup();
+});
+
+test("a rejecting push service cannot leak its error or bypass closed-flow cleanup", async () => {
+  const dir = scriptsFixture();
+  const tmpRoot = path.join(dir, "git-tmp");
+  const exec = fakeGit({ root: dir });
+  const service = createGitActions({
+    exec,
+    tmpRoot,
+    generateText: async () => ({ text: "tidy the header" }),
+  });
+  const discarded = [];
+  const baseDiscard = service.discard;
+  service.discard = (input) => {
+    discarded.push(input?.token);
+    return baseDiscard(input);
+  };
+  const flowTest = await startCommitFlow({ dir, tmpRoot, exec, service, skipPreview: true });
+  const { flow, calls, runtime } = flowTest;
+  flow.cancel();
+  assert.equal(runtime.openGit("push").ok, true);
+  await until(() => flow.state()?.step === "push-review", "the push review");
+  assert.equal(flow.confirmPush(), true);
+
+  let reachedPush;
+  const pushReached = new Promise((resolve) => {
+    reachedPush = resolve;
+  });
+  let rejectPush;
+  const gate = new Promise((_, reject) => {
+    rejectPush = reject;
+  });
+  let attemptedToken;
+  service.push = async (input) => {
+    attemptedToken = input.token;
+    reachedPush();
+    await gate;
+  };
+
+  const running = flow.pushNow();
+  await pushReached;
+  flow.cancel();
+  rejectPush(new Error("private remote https://alice:hunter2@example.invalid/repo.git"));
+  const result = await running;
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "push-failed");
+  assert.match(result.error.message, /outcome is unknown/);
+  assert.equal(JSON.stringify(result).includes("hunter2"), false);
+  assert.equal(JSON.stringify(calls.toasts).includes("hunter2"), false);
+  assert.deepEqual(discarded, [attemptedToken]);
+  assert.equal(flow.state(), null);
+  assert.equal(calls.toasts.filter((toast) => toast.message.includes("outcome is unknown")).length, 1);
+
+  await flowTest.cleanup();
+});
+
+test("the preview preflight prefers an available OpenCodex Luna model", async () => {
+  const flowTest = await startCommitFlow({
+    context: {
+      providers: [
+        { id: "opencodex", name: "OpenCodex", activation: "enabled" },
+        { id: "openai", name: "OpenAI", activation: "enabled" },
+      ],
+      models: [
+        {
+          id: "gpt-6-luna",
+          modelID: "gpt-6-luna",
+          providerID: "opencodex",
+          name: "Luna",
+          enabled: true,
+          variants: [{ id: "low" }],
+        },
+        {
+          id: "gpt-6-luna",
+          modelID: "gpt-6-luna",
+          providerID: "openai",
+          name: "Luna",
+          enabled: true,
+          variants: [],
+        },
+      ],
+    },
+  });
+  const { calls, flow } = flowTest;
+
+  assert.equal(flow.state().step, "preview", "the probe completed before the Generate action is offered");
+  assert.deepEqual(flow.state().generator, {
+    source: "opencodex",
+    providerID: "opencodex",
+    id: "gpt-6-luna",
+    variant: "low",
+    providerName: "OpenCodex",
+    modelName: "Luna",
+    verified: true,
+  });
+  assert.equal(calls.providers.length, 1, "provider metadata was read once");
+  assert.equal(calls.models.length, 1, "model metadata was read once");
+  assert.equal(calls.generates.length, 0, "the probe sends no diff and calls no model");
+
+  assert.equal(flow.state().generator.providerName, "OpenCodex");
+  assert.equal(flow.state().generator.id, "gpt-6-luna");
+
+  await flow.approveEgress();
+  assert.equal(calls.generates.length, 1, "the diff is sent only after approval");
+  assert.deepEqual(calls.generates[0].payload.model, {
+    providerID: "opencodex",
+    id: "gpt-6-luna",
+    variant: "low",
+  });
+
+  flow.cancel();
+  await flowTest.cleanup();
+});
+
+test("without OpenCodex the probe uses the native OpenAI Luna model it advertises", async () => {
+  const flowTest = await startCommitFlow({
+    context: {
+      providers: [{ id: "openai", name: "OpenAI", activation: "enabled" }],
+      models: [
+        {
+          id: "other-model",
+          modelID: "other-model",
+          providerID: "openai",
+          name: "Other",
+          enabled: true,
+          variants: [],
+        },
+        {
+          id: "gpt-6-luna",
+          modelID: "gpt-6-luna",
+          providerID: "openai",
+          name: "Luna",
+          enabled: true,
+          variants: [],
+        },
+      ],
+    },
+  });
+  const { calls, flow } = flowTest;
+
+  assert.equal(flow.state().step, "preview");
+  assert.deepEqual(flow.state().generator, {
+    source: "openai",
+    providerID: "openai",
+    id: "gpt-6-luna",
+    providerName: "OpenAI",
+    modelName: "Luna",
+    verified: true,
+  });
+  assert.equal(calls.generates.length, 0, "the probe makes no model call");
+
+  await flow.approveEgress();
+  assert.equal(calls.generates.length, 1);
+  // Native OpenAI sees no proxy "low" variant: only an advertised variant may
+  // be sent, and none is advertised here.
+  assert.deepEqual(calls.generates[0].payload.model, {
+    providerID: "openai",
+    id: "gpt-6-luna",
+  });
+
+  flow.cancel();
+  await flowTest.cleanup();
+});
+
+test("when neither provider offers Luna the review cannot generate and sends nothing", async () => {
+  const flowTest = await startCommitFlow({
+    context: {
+      providers: [
+        { id: "opencodex", name: "OpenCodex", activation: "enabled" },
+        { id: "openai", name: "OpenAI", activation: "enabled" },
+      ],
+      models: [
+        {
+          id: "gpt-6-luna",
+          modelID: "gpt-6-luna",
+          providerID: "opencodex",
+          name: "Luna",
+          enabled: false,
+          variants: [{ id: "low" }],
+        },
+        {
+          id: "gpt-5",
+          modelID: "gpt-5",
+          providerID: "openai",
+          name: "GPT-5",
+          enabled: true,
+          variants: [],
+        },
+      ],
+    },
+  });
+  const { calls, flow } = flowTest;
+
+  assert.equal(flow.state().step, "preview", "the Generate action is not offered without a usable model");
+  assert.equal(flow.state().error.code, "model-unavailable");
+  assert.match(flow.state().error.message, /Luna/);
+  assert.equal(calls.generates.length, 0, "nothing was sent");
+  assert.equal(await flow.approveEgress(), null, "generation stays unreachable");
+
+  flow.cancel();
+  await flowTest.cleanup();
+});
+
+test("an unavailable or partial provider probe is refused, never silently proxied", async () => {
+  for (const context of [
+    { providers: [], models: [], providerListThrows: true },
+    { providers: [], models: [], modelListThrows: true },
+    { providers: [], modelListMissing: true },
+    { models: [] },
+  ]) {
+    const flowTest = await startCommitFlow({ context });
+    const { calls, flow } = flowTest;
+
+    assert.equal(flow.state().step, "preview", "no Generate action is reached");
+    assert.equal(flow.state().error.code, "generator-probe-failed");
+    assert.equal(await flow.approveEgress(), null, "generation stays unreachable");
+    assert.equal(calls.generates.length, 0, "no diff is sent");
+
+    flow.cancel();
+    await flowTest.cleanup();
+  }
+});
+
+test("an ambiguous native Luna catalog is refused instead of guessing a model", async () => {
+  const flowTest = await startCommitFlow({
+    context: {
+      providers: [{ id: "openai", name: "OpenAI", activation: "enabled" }],
+      models: [
+        {
+          id: "openai-luna-a",
+          modelID: "openai-luna-a",
+          providerID: "openai",
+          name: "Luna A",
+          enabled: true,
+          variants: [],
+        },
+        {
+          id: "openai-luna-b",
+          modelID: "openai-luna-b",
+          providerID: "openai",
+          name: "Luna B",
+          enabled: true,
+          variants: [],
+        },
+      ],
+    },
+  });
+  const { calls, flow } = flowTest;
+
+  assert.equal(flow.state().step, "preview");
+  assert.equal(flow.state().error.code, "model-ambiguous");
+  assert.equal(calls.generates.length, 0, "no guessed model receives the diff");
+
+  flow.cancel();
+  await flowTest.cleanup();
+});
+
+test("a native OpenAI generation failure is not retried on another model", async () => {
+  const flowTest = await startCommitFlow({
+    context: {
+      providers: [{ id: "openai", name: "OpenAI", activation: "enabled" }],
+      models: [
+        {
+          id: "gpt-6-luna",
+          modelID: "gpt-6-luna",
+          providerID: "openai",
+          name: "Luna",
+          enabled: true,
+          variants: [],
+        },
+      ],
+      generateThrows: true,
+    },
+  });
+  const { calls, flow } = flowTest;
+
+  assert.equal((await flow.approveEgress())?.ok, false);
+  assert.equal(flow.state().step, "preview");
+  assert.equal(calls.generates.length, 1, "one approved attempt, no fallback retry");
+  assert.deepEqual(calls.generates[0].payload.model, {
+    providerID: "openai",
+    id: "gpt-6-luna",
+  });
+
+  flow.cancel();
+  await flowTest.cleanup();
+});
+
 test("an unusable model answer is refused rather than shown", async () => {
   for (const context of [{ generateMalformed: true }, { generateReply: "   " }]) {
     const flowTest = await startCommitFlow({ context });
@@ -1866,18 +3010,222 @@ test("an unusable model answer is refused rather than shown", async () => {
   }
 });
 
-test("a missing native generator is reported, never replaced by a subprocess", async () => {
+test("a missing native generator is reported before the review can generate, never replaced by a subprocess", async () => {
   const flowTest = await startCommitFlow({ context: { generateMissing: true } });
   const { calls, exec, flow } = flowTest;
 
-  const result = await flow.approveEgress();
-  assert.equal(result?.ok, false);
-  assert.equal(result.error.code, "generation-unavailable");
-  assert.equal(result.error.message, "No commit message generator is connected");
-  assert.equal(exec.calls.filter((call) => call.file !== "git").length, 0, "no subprocess fallback");
+  // The adapter is checked before the Generate action: no approval may be offered
+  // for a generator that cannot run.
   assert.equal(flow.state().step, "preview");
+  assert.equal(flow.state().generator, null);
+  assert.equal(flow.state().error.code, "generation-unavailable");
+  assert.equal(flow.state().error.message, "No commit message generator is connected");
+  assert.equal(await flow.approveEgress(), null, "generation stays unreachable");
+  assert.equal(calls.generates.length, 0);
+  assert.equal(exec.calls.filter((call) => call.file !== "git").length, 0, "no subprocess fallback");
 
   flow.cancel();
+  await flowTest.cleanup();
+});
+
+test("a service with no generateMessage is refused before the Generate action", async () => {
+  const dir = scriptsFixture();
+  const tmpRoot = path.join(dir, "git-tmp");
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0";
+  const exec = fakeGit({ root: dir, status });
+  const service = createGitActions({
+    exec,
+    tmpRoot,
+    generateText: async () => ({ text: "tidy the header" }),
+  });
+  delete service.generateMessage;
+  const flowTest = await startCommitFlow({ dir, tmpRoot, exec, service });
+  const { flow } = flowTest;
+
+  assert.equal(flow.state().step, "preview");
+  assert.equal(flow.state().generator, null);
+  assert.equal(flow.state().error.code, "generation-unavailable");
+  assert.equal(await flow.approveEgress(), null, "generation stays unreachable");
+
+  flow.cancel();
+  await flowTest.cleanup();
+});
+
+test("a thrown review clears busy and reports a safe generic error", async () => {
+  const dir = scriptsFixture();
+  const tmpRoot = path.join(dir, "git-tmp");
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0";
+  const exec = fakeGit({ root: dir, status, previewThrows: true });
+  const flowTest = await startCommitFlow({ dir, tmpRoot, exec, skipPreview: true });
+  const { flow } = flowTest;
+
+  await flow.previewSelection();
+  assert.equal(flow.state().step, "files");
+  assert.equal(flow.state().busy, "");
+  assert.equal(flow.state().error.code, "preview-failed");
+  assert.equal(flow.state().error.message, "The review could not be prepared");
+  assert.equal(
+    JSON.stringify(flow.state()).includes("review exploded"),
+    false,
+    "the service's raw failure text never reaches the dashboard",
+  );
+
+  flow.cancel();
+  await flowTest.cleanup();
+});
+
+test("a thrown generation clears busy and reports a safe generic error", async () => {
+  const dir = scriptsFixture();
+  const tmpRoot = path.join(dir, "git-tmp");
+  const status = "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0";
+  const exec = fakeGit({ root: dir, status });
+  const service = createGitActions({
+    exec,
+    tmpRoot,
+    generateText: async () => ({ text: "tidy the header" }),
+  });
+  service.generateMessage = async () => {
+    throw new Error("provider echoed the frozen diff");
+  };
+  const flowTest = await startCommitFlow({ dir, tmpRoot, exec, service });
+  const { flow } = flowTest;
+
+  assert.equal(flow.state().step, "preview");
+  await flow.approveEgress();
+  assert.equal(flow.state().step, "preview", "the review stays usable");
+  assert.equal(flow.state().busy, "");
+  assert.equal(flow.state().error.code, "generation-failed");
+  assert.equal(flow.state().error.message, "Luna message generation failed");
+  assert.equal(
+    JSON.stringify(flow.state()).includes("provider echoed"),
+    false,
+    "the provider's raw message never reaches the dashboard",
+  );
+
+  flow.cancel();
+  await flowTest.cleanup();
+});
+
+test("metadata failure still allows writing a message by hand and never calls a model", async () => {
+  const flowTest = await startCommitFlow({
+    context: { providers: [], models: [], providerListThrows: true },
+  });
+  const { calls, exec, flow } = flowTest;
+
+  assert.equal(flow.state().step, "preview");
+  assert.equal(flow.state().generator, null);
+  assert.equal(flow.state().error.code, "generator-probe-failed");
+
+  // The manual action is independent of the generator: it opens the same editor
+  // from the review, with no generation and no automatic commit.
+  flow.editMessage();
+  assert.equal(flow.state().step, "edit");
+  assert.equal(flow.state().draft, "");
+  assert.equal(flow.draftChanged("write the message by hand"), true);
+  assert.equal(flow.saveMessage(), "write the message by hand");
+  assert.equal(flow.state().step, "confirm");
+  assert.equal(
+    gitSubcommands(exec, "commit").length > 0,
+    false,
+    "saving the message never commits",
+  );
+
+  await flow.confirm();
+  await until(() => flow.state() === null, "the dialog to close");
+  assert.equal(
+    gitSubcommands(exec, "commit").find((line) => line.startsWith("commit -m")),
+    "commit -m write the message by hand",
+  );
+  assert.equal(calls.generates.length, 0, "the manual path never sends the diff");
+
+  await flowTest.cleanup();
+});
+
+test("a host that never answers the generator probe times out before the Generate action", async (t) => {
+  let failLate;
+  const gate = new Promise((resolve, reject) => {
+    failLate = reject;
+  });
+  const flowTest = await startCommitFlow({
+    skipPreview: true,
+    context: {
+      providers: [{ id: "openai", name: "OpenAI", activation: "enabled" }],
+      models: [
+        {
+          id: "gpt-6-luna",
+          modelID: "gpt-6-luna",
+          providerID: "openai",
+          name: "Luna",
+          enabled: true,
+          variants: [],
+        },
+      ],
+      providerListGate: () => gate,
+      modelListGate: () => gate,
+    },
+  });
+  const { calls, flow } = flowTest;
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  const pending = flow.previewSelection();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(flow.state().busy, "checking the Luna generator");
+  t.mock.timers.tick(10000);
+  assert.ok(await pending, "the review stays mounted after the probe ends");
+  assert.equal(flow.state().step, "preview", "the Generate action is not offered after a timeout");
+  assert.equal(flow.state().generator, null);
+  assert.equal(flow.state().error.code, "generator-probe-failed");
+  assert.match(flow.state().error.message, /timed out/);
+  assert.equal(calls.generates.length, 0, "nothing was sent");
+
+  // A late rejection from the abandoned probe is consumed, not an unhandled
+  // rejection, and it must not change the state the timeout already reported.
+  const afterTimeout = flow.state();
+  failLate(new Error("late metadata failure"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(flow.state(), afterTimeout);
+
+  flow.cancel();
+  await flowTest.cleanup();
+});
+
+test("a cancelled generator probe ignores a late metadata answer", async () => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const flowTest = await startCommitFlow({
+    skipPreview: true,
+    context: {
+      providers: [{ id: "openai", name: "OpenAI", activation: "enabled" }],
+      models: [
+        {
+          id: "gpt-6-luna",
+          modelID: "gpt-6-luna",
+          providerID: "openai",
+          name: "Luna",
+          enabled: true,
+          variants: [],
+        },
+      ],
+      providerListGate: () => gate,
+      modelListGate: () => gate,
+    },
+  });
+  const { calls, flow } = flowTest;
+
+  const pending = flow.previewSelection();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(flow.state().busy, "checking the Luna generator");
+  flow.cancel();
+  assert.equal(flow.state(), null);
+
+  release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(await pending, null);
+  assert.equal(flow.state(), null, "a late answer must not reopen a cancelled flow");
+  assert.equal(calls.generates.length, 0, "nothing was sent");
+
   await flowTest.cleanup();
 });
 
@@ -1886,45 +3234,89 @@ test("a generated subject and body keep their blank separator through to the com
     context: {
       // A drafted subject plus body, as the model returns it.
       generateReply: "add the header\n\nBody explains why.\n",
-      // The user accepts the draft as-is.
-      promptAnswers: [(options) => options.value],
     },
+  });
+  const { flow, exec } = flowTest;
+
+  await flow.approveEgress();
+  await until(() => flow.state()?.step === "edit", "the message editor");
+  assert.equal(
+    flow.state().draft,
+    "add the header\n\nBody explains why.",
+    "the internal blank line survives, only the outer newline is trimmed",
+  );
+  assert.equal(flow.state().message, flow.state().draft);
+
+  // The editor is a real multi-line field, so what is typed is what is kept.
+  assert.equal(flow.draftChanged("add the header\n\nBody explains why.\nBecause it is clearer.\n"), true);
+  assert.equal(flow.state().draft, "add the header\n\nBody explains why.\nBecause it is clearer.\n");
+  assert.equal(flow.saveMessage(), "add the header\n\nBody explains why.\nBecause it is clearer.");
+  assert.equal(flow.state().step, "confirm");
+
+  await flow.confirm();
+  await until(() => flow.state() === null, "the dialog to close");
+  const committed = gitSubcommands(exec, "commit").find((line) => line.startsWith("commit -m"));
+  assert.equal(committed, "commit -m add the header\n\nBody explains why.\nBecause it is clearer.");
+
+  await flowTest.cleanup();
+});
+
+test("a saved message survives a second edit and still commits once", async () => {
+  const flowTest = await startCommitFlow({
+    context: { generateReply: "generated subject\n\nGenerated body.\n" },
   });
   const { calls, flow, exec } = flowTest;
 
   await flow.approveEgress();
-  await until(() => calls.prompts.length === 1, "the message prompt");
-  assert.equal(
-    calls.prompts[0].value,
-    "add the header\n\nBody explains why.",
-    "the internal blank line survives, only the outer newline is trimmed",
-  );
+  await until(() => flow.state()?.step === "edit", "the message editor");
+  assert.equal(flow.draftChanged("saved subject\n\nSaved body."), true);
+  assert.equal(flow.saveMessage(), "saved subject\n\nSaved body.");
   assert.equal(flow.state().step, "confirm");
-  assert.equal(flow.state().message, calls.prompts[0].value);
+
+  // Reopening the editor starts from the saved message, never from the older
+  // generated draft. Cancelling a second rewrite leaves the saved message.
+  flow.editMessage();
+  assert.equal(flow.state().step, "edit");
+  assert.equal(flow.state().draft, "saved subject\n\nSaved body.", "the saved message is the draft");
+  assert.equal(flow.draftChanged("a rewrite that is thrown away"), true);
+  assert.equal(flow.cancelMessage(), "saved subject\n\nSaved body.");
+  assert.equal(flow.state().message, "saved subject\n\nSaved body.");
+  assert.equal(flow.state().step, "confirm");
+  assert.equal(
+    gitSubcommands(exec, "commit").length > 0,
+    false,
+    "editing again never commits",
+  );
 
   await flow.confirm();
   await until(() => flow.state() === null, "the dialog to close");
-  const committed = exec.commands().find((line) => line.startsWith("commit -m"));
-  assert.equal(committed, "commit -m add the header\n\nBody explains why.");
+  assert.equal(
+    gitSubcommands(exec, "commit").find((line) => line.startsWith("commit -m")),
+    "commit -m saved subject\n\nSaved body.",
+    "the final commit uses the saved message",
+  );
+  assert.equal(calls.generates.length, 1, "reopening the editor never sends the diff again");
 
   await flowTest.cleanup();
 });
 
 test("clearing the message drops the draft and commits nothing", async () => {
-  for (const answer of ["", "   "]) {
-    const flowTest = await startCommitFlow({ context: { promptAnswers: [answer] } });
-    const { calls, flow, exec } = flowTest;
+  for (const typed of ["", "   "]) {
+    const flowTest = await startCommitFlow({});
+    const { flow, exec } = flowTest;
 
     await flow.approveEgress();
-    await until(() => calls.prompts.length === 1, "the message prompt");
-    assert.equal(calls.prompts[0].value, "tidy the header", "the generated draft is offered");
+    await until(() => flow.state()?.step === "edit", "the message editor");
+    assert.equal(flow.state().draft, "tidy the header", "the generated draft is offered");
+    assert.equal(flow.draftChanged(typed), true);
+    assert.equal(flow.saveMessage(), null, "an empty field saves nothing");
     assert.equal(flow.state().message, "", "an explicit clear really clears it");
     assert.equal(flow.state().step, "preview", "the flow goes back, it does not commit");
     assert.match(flow.state().notice, /cleared/i);
     assert.equal(flow.state().error, null);
     assert.equal(await flow.confirm(), null, "there is nothing to confirm");
     assert.equal(
-      exec.commands().some((line) => line.startsWith("commit")),
+      gitSubcommands(exec, "commit").length > 0,
       false,
       "a deleted message never commits",
     );
@@ -1934,22 +3326,23 @@ test("clearing the message drops the draft and commits nothing", async () => {
   }
 });
 
-test("cancelling the message prompt keeps the draft and still never commits", async () => {
-  const flowTest = await startCommitFlow({
-    // No answer at all: the host prompt was dismissed.
-    context: { promptAnswers: [] },
-  });
-  const { calls, flow, exec } = flowTest;
+test("cancelling the editor keeps the draft and still never commits", async () => {
+  const flowTest = await startCommitFlow({});
+  const { flow, exec } = flowTest;
 
   const returned = await flow.approveEgress();
-  await until(() => calls.prompts.length === 1, "the message prompt");
+  await until(() => flow.state()?.step === "edit", "the message editor");
   assert.equal(returned, "tidy the header", "the draft is returned for editing");
+  // Typing something else and then cancelling keeps the message the flow had: an
+  // edit only ever lands through an explicit save.
+  assert.equal(flow.draftChanged("a rewrite that is dropped"), true);
+  assert.equal(flow.cancelMessage(), "tidy the header");
   assert.equal(flow.state().step, "confirm");
   assert.equal(flow.state().message, "tidy the header", "the draft is kept");
   assert.equal(
-    exec.commands().some((line) => line.startsWith("commit")),
+    gitSubcommands(exec, "commit").length > 0,
     false,
-    "cancelling a prompt never commits on its own",
+    "cancelling the editor never commits on its own",
   );
 
   flow.cancel();
@@ -2175,7 +3568,6 @@ test("a commit that already exists is shown with its hash and never retried", as
     locationDirectory: dir,
     sessions: { s1: { directory: dir } },
     route: () => ({ type: "session", sessionID: "s1" }),
-    promptAnswers: ["fix(web): one line"],
     diffFiles: { s1: ["src/a.ts"] },
   });
   const cleanup = await startPlugin(context, view, {
@@ -2191,19 +3583,21 @@ test("a commit that already exists is shown with its hash and never retried", as
   await until(() => flow.state()?.step === "files", "the file list");
   assert.deepEqual(flow.state().selection, ["src/a.ts"], "the confirmed session change starts checked");
   await flow.previewSelection();
-  flow.askEgress();
   await flow.approveEgress();
+  await until(() => flow.state()?.step === "edit", "the message editor");
+  // The draft is saved as it stands, so the commit is the reviewed message.
+  await flow.saveMessage();
   await until(() => flow.state()?.step === "confirm", "the confirm step");
 
   await flow.confirm();
   // The failure carries the hash of the commit that exists.
   assert.equal(flow.state().step, "committed");
   assert.equal(flow.state().error.code, "hook-changed-tree");
-  assert.equal(flow.state().error.hash, "head2");
+  assert.equal(flow.state().error.hash, COMMIT_TWO);
   assert.equal(flow.state().token !== null, true, "the review is still owned for cleanup");
   assert.equal(
     calls.toasts.at(-1).message,
-    "Commit exists as head2 — do not retry",
+    `Commit exists as ${COMMIT_TWO} — do not retry`,
     "the hash is said out loud",
   );
   assert.equal(calls.toasts.at(-1).variant, "error");
@@ -2212,7 +3606,7 @@ test("a commit that already exists is shown with its hash and never retried", as
   assert.notEqual(flow.state().step, "confirm");
   assert.equal(await flow.confirm(), null);
   assert.equal(await flow.confirmPush(), false);
-  const commits = exec.commands().filter((line) => line.startsWith("commit -m"));
+  const commits = gitSubcommands(exec, "commit").filter((line) => line.startsWith("commit -m"));
   assert.equal(commits.length, 1, "one commit was attempted");
 
   // Closing drops the review and leaves the repository alone.
@@ -2269,7 +3663,7 @@ test("the push flow shows the exact target and never forces", async () => {
   assert.ok(pushed, "the confirmed push reached git");
   // The remote and one explicit refspec, last: push.default and a configured
   // refspec cannot pick another destination.
-  assert.equal(pushed.args.at(-1), "HEAD:refs/heads/main");
+  assert.equal(pushed.args.at(-1), `${target.head}:refs/heads/main`);
   assert.equal(pushed.args.at(-2), "origin");
   for (const flag of ["--force", "-f", "--mirror", "--all", "--tags", "--force-with-lease", "--delete", "--prune"]) {
     assert.equal(pushed.args.includes(flag), false, `the push must not pass ${flag}`);
@@ -2341,7 +3735,7 @@ test("cancelling a review drops it and leaves the repository alone", async () =>
   assert.equal(flow.state(), null);
   assert.equal(readdirSync(tmpRoot).length, 0, "cancelling drops the private index");
   assert.equal(
-    exec.commands().some((line) => line.startsWith("commit")),
+    gitSubcommands(exec, "commit").length > 0,
     false,
     "cancelling writes nothing",
   );
@@ -3655,7 +5049,7 @@ test("escape cancels the flow through the dialog's own close hook", async () => 
   // a second clear.
   assert.equal(calls.dialogs.at(-1).clear, undefined, "the host pops the dialog itself");
   assert.equal(
-    exec.commands().some((line) => line.startsWith("commit")),
+    gitSubcommands(exec, "commit").length > 0,
     false,
     "escape never commits",
   );

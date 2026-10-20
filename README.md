@@ -116,18 +116,50 @@ files remain unchecked. Review and adjust the selection before continuing. A fil
 to touch (a conflict, a submodule, an ambiguous rename, an
 unsafe path) is shown with its reason and cannot be picked. `Continue` freezes exactly the selected
 files into a private index and shows the full patch. If that patch cannot be shown in full, the review
-is dropped and nothing is committed. `Generate message` asks first: the next step states that the diff
-goes to the configured OpenCodex provider using `gpt-6-luna` with low reasoning. Generation uses
-OpenCode's native text API, without tools or a child session, and never falls back to another provider.
-Approve it and the returned draft opens in an editable message prompt. Clearing the field removes
-the draft and returns to the preview; cancelling an edit keeps the existing draft. Neither action
+is dropped and nothing is committed. The preview then preflights the generator: the plugin reads the host's
+provider and model metadata, preferring the configured `opencodex` route when it advertises
+`gpt-6-luna`, and otherwise accepting native OpenAI Luna only when OpenAI advertises the exact
+`gpt-6-luna` model or a single Luna-named model. That preflight sends no diff and makes no model
+call. A host that exposes neither provider nor model listing keeps the historical fixed `opencodex` /
+`gpt-6-luna` (low) default for compatibility; the preview calls that destination the assumed default,
+not a verified route. The preview names the actual provider and model that will receive the diff and
+states that this selected frozen diff is the only thing leaving the machine in the flow. One
+**Generate message** action becomes available after the preflight answers; pressing it is the approval
+and sends that exact diff. **Write message** is always available on the review, even when the
+preflight fails: it opens the same editor with no generation and no commit. Generation uses OpenCode's
+native text API, without tools or a child session; a host without that adapter is refused before the
+action is available. If neither route is available, the review stops with an actionable error and
+sends nothing: it never guesses a model. A provider, authentication, or generation failure after
+approval becomes a safe generic error, so provider text cannot echo the reviewed diff. Neither
+switches or retries the other provider or model.
+The returned draft opens in a multiline message editor that uses the body height; the frozen diff is
+not repeated there. A visible counter reads `Message · line N of M`. Enter inserts a newline; use
+**Save message** or Alt+Enter to save the draft before the separate final Commit confirmation. The
+editor opens at the start so the subject is reviewable first. Arrows scroll the field, Home returns to
+the top, End shows the tail, and the counter follows the caret; text longer than the field scrolls
+inside it instead of being cut. The final confirmation keeps a fixed line naming the controls:
+the mouse wheel or PgUp/PgDn scrolls, End jumps to the end, and Home returns to the top. Its 4–16 row
+scroll area labels `Message`, marks `— end of message —`, and then labels `Frozen diff`; **Commit**,
+**Edit message**, **Back**, and **Cancel** stay fixed below it, and wrap onto more rows at narrow
+widths instead of running off screen. Generated drafts are
+bounded to 60 lines and 4000 characters, so a longer model reply is shortened before you review it;
+Commit refuses a manually saved message longer than 4000 characters with "The commit message is too
+long". No display step truncates the saved message.
+Clearing the field and saving removes
+the draft and returns to the preview; cancelling an edit discards unsaved changes and keeps the previously saved message. Neither action
 commits anything. Generated subjects use plain descriptions, without `feat:`, `fix:`, or other
 Conventional Commit prefixes. The generation prompt forbids AI attribution. Manual edits are kept as
 written. `Commit` then commits those files from the frozen index, never skipping hooks,
-and reports the short hash. The message can be edited again before the final confirm. If the commit
-lands but a later step fails (a hook rewrote what was committed, the index moved, the reset failed),
-the dialog says so, shows the full commit hash, and stops: the commit is already in history, so it is
-never retried. Close the window and reconcile the leftover files by hand.
+and reports the short hash. A private reference-transaction guard accepts only the frozen branch (or
+detached HEAD) at the frozen commit: a concurrent commit, a ref move, or a same-hash branch switch is
+rejected before the ref updates, and the reported hash is the one that guard recorded. Hooks are
+dispatched from the configured hooks path, including relative, absolute and `/dev/null` settings.
+The message can be edited again before the final confirm. If the commit
+lands but a later step fails (a hook rewrote what was committed, moved HEAD, the index moved, the
+reset failed), the dialog says so, shows the full commit hash, and stops: the commit is already in
+history, so it is never retried. When the guard cannot record the landed commit, the outcome is
+reported as unknown rather than as a known commit. Close the window and reconcile the leftover files
+by hand.
 
 In the file-selection screen, **⊘** adds an untracked file to the repository-root `.gitignore`.
 The rule targets that exact path, not a folder or file extension. Tracked and blocked entries cannot
@@ -135,13 +167,16 @@ be ignored through this control: `.gitignore` does not stop tracking existing fi
 does not stage or commit anything. The list refreshes while keeping your other selections.
 
 **Push** — the dialog resolves the exact destination from `@{push}` (never a guessed remote), and shows
-the branch, the remote URL, the upstream ref and the outgoing commits. `Confirm push` opens a second
-step, and only `Push now` sends it: one explicit remote and refspec, never a force flag. A target that
-moved since the review, a detached HEAD, a mirror remote, or a remote with several push URLs is refused
-instead of guessed.
+the branch, the remote URL with embedded credentials redacted, the upstream ref and the outgoing commits. `Confirm push` opens a second
+step, and only `Push now` sends it: one explicit remote and a refspec naming the frozen commit, never a
+force flag. A target that moved since the review, a detached HEAD, a mirror remote, or a remote with
+several push URLs is refused instead of guessed.
 
-Escape, the dialog's own close button, and `Cancel` all end the flow, drop the frozen review and its
-temp index, and leave the repository untouched. The session and the folder are captured when you click,
+Escape and the dialog's own close button close the flow. `Cancel` also closes the flow except in the
+message editor, where it discards unsaved edits and returns to the review. Before a commit or push starts,
+cancelling drops the frozen review and its temp index without committing or pushing. Closing the dialog
+does not undo an already-started commit or push: its result is still reported, and its temporary files
+are kept until the operation finishes. The session and the folder are captured when you click,
 so switching tabs afterwards cannot widen a flow to another project.
 
 ## Which project is which
@@ -407,13 +442,23 @@ and explains an empty history, and a stop request for a vanished run is answered
 The Git flows are covered against the service with scripted Git responses and a native text-generation
 double, without provider calls: the click-time session and folder, the session
 diff preselecting only confirmed safe session changes, a blocked file refusing selection, the exact patch and
-stat shown for review, generation sending only the frozen selected diff after sharing approval,
-the API refusing to generate before that step, the editable message
-prompt, the commit running the frozen selection
+stat shown for review, the preview preflight reading provider/model metadata before the action is
+offered, preferring OpenCodex when it advertises Luna, falling back to native OpenAI Luna only when it
+is advertised, and refusing to send when neither exists or the probe fails, stalls past its deadline,
+or the host lacks the text adapter, the inline disclosure naming the selected provider and model and
+marking the legacy fixed default as assumed rather than verified, a manual Write message path that
+generates nothing, generation sending only the frozen selected diff after the single Generate action
+and only once, a review frozen while the flow is cancelled being discarded, a thrown preview or
+generation becoming a safe generic error, a press before that preflight answering being a no-op, no
+automatic send before the approval, a generation failure never retrying another provider, and a late or
+cancelled probe never changing state,
+the editable message prompt, the commit running the frozen selection
 without `--no-verify`, a truncated patch being dropped instead of committed blind, the push target
 resolved from `@{push}` and confirmed in a second step, one explicit remote and refspec with no force
-flag, the API refusing to push before that confirmation, and cancellation (button and escape) dropping
-the private index and the push token and writing nothing. The session diff is read from the live host
+flag, the API refusing to push before that confirmation, and cancellation before mutation dropping
+the private index and the push token without committing or pushing. Closing during a mutation defers
+cleanup until it settles and still reports its outcome. Public push destinations redact embedded
+credentials while target checks retain the exact URL. The session diff is read from the live host
 snapshot when it exists and from the native host client otherwise. Partial reads retain confirmed
 paths and warn; files without a confirmed match remain unattributed and unchecked. Failure
 paths are covered too: a repository that cannot be read, a push target that cannot be resolved, a
@@ -440,7 +485,10 @@ commands, Git directories and worktree pointers, saved visibility, external sett
 storage failures. Cargo runtime tests use mocked processes; no test runs Cargo or installs components.
 
 `view.render.test.mjs` exercises the actual Sidebar component through a standalone OpenTUI renderer,
-including singleton rows, narrow widths, long labels, and Cargo buttons. The renderer harness needs
+including singleton rows, narrow widths, long labels, and Cargo buttons. The Git review scenarios also
+render a message longer than the editor field and a confirmation taller than the dialog: the subject is
+on screen at the start, End and the mouse reach the tail, the saved text keeps every line, the Commit
+controls stay fixed, and no row is replaced by an ellipsis. The renderer harness needs
 Bun, OpenTUI, Solid, and the Babel Solid transform; see its imports for the required runtime packages.
 It is not the host's exact plugin loading path.
 
@@ -466,11 +514,20 @@ mouse handling on every terminal emulator. Those need a manual TUI check.
 - The stop grace period trades latency for cleanup: a child that ignores `SIGTERM` keeps its group
   alive until the five-second timer escalates to `SIGKILL`. During shutdown (`dispose`) that escalation
   is immediate, so the grace period is only skipped when the TUI is exiting.
-- The Git flows need the `git` binary on `PATH`. Generated messages additionally need the native
-  OpenCode text-generation API and access to `opencodex/gpt-6-luna`; Copilot CLI is not required.
-  Generation sends only the frozen selected diff after sharing approval, with a 120-second deadline.
+- The Git flows need the `git` binary on `PATH`. Committing needs Git 2.29 or newer, because the
+  commit guard runs as a `reference-transaction` hook and older versions ignore that hook; the flow
+  refuses instead of committing without the guard. Generated messages additionally need the native
+  OpenCode text-generation API plus either an available OpenCodex provider advertising
+  `gpt-6-luna` or a native OpenAI provider advertising that exact model or a single Luna-named one;
+  Copilot CLI is not required. The preview preflight reads host metadata only, makes no model call,
+  and gives up after ten seconds; a host without the native text adapter is refused before the
+  Generate action is offered. A host that lists neither providers nor models keeps the fixed
+  `opencodex` / `gpt-6-luna` (low) assumption, so it cannot detect a missing proxy.
+  Generation sends only the frozen selected diff after the single Generate action, with a
+  120-second deadline.
   Subjects use plain English without Conventional Commit prefixes such as `feat:` or `fix:`.
-  Provider failures are reported without silently selecting a different provider or model.
+  A provider failure after approval is reported without silently selecting a different provider or
+  model; if neither provider is available the flow stops with an actionable error.
 - `Push` pushes the branch's own `@{push}` destination with one refspec and no force flag. It does not
   offer a remote picker, and it never pushes tags.
 - Unless a stop is already in flight, a group is only signalled while its identity is provable: the

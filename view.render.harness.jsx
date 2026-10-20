@@ -11,7 +11,7 @@
 // with bun from a directory that can resolve @opentui/solid. It prints one JSON
 // document after the marker line.
 import { testRender } from "@opentui/solid";
-import { GitDialog, SettingsDialog, Sidebar } from "./view.jsx";
+import { GitDialog, LogDialog, SettingsDialog, Sidebar } from "./view.jsx";
 
 const MARKER = "##SIDEBAR-RENDER##";
 
@@ -56,6 +56,10 @@ function createFakeRuntime(initial) {
   // The commit flow behind GitDialog. It is not the runtime; GitDialog receives
   // it as `flow`. Its calls land in the same log as the runtime's, so one
   // scenario prints one call list.
+  const gitListeners = [];
+  const notifyGit = () => {
+    for (const listener of Array.from(gitListeners)) listener();
+  };
   const git = {
     kind: initial.git?.kind ?? "commit",
     step: initial.git?.step ?? "files",
@@ -67,6 +71,8 @@ function createFakeRuntime(initial) {
     error: initial.git?.error ?? null,
     preview: initial.git?.preview ?? null,
     message: initial.git?.message ?? "",
+    draft: initial.git?.draft ?? initial.git?.message ?? "",
+    generator: initial.git?.generator ?? null,
     push: initial.git?.push ?? null,
     selection: [...(initial.git?.selection ?? [])],
     files: (initial.git?.files ?? []).map((file) => ({ ...file })),
@@ -75,7 +81,13 @@ function createFakeRuntime(initial) {
     state,
     calls,
     gitFlow: {
-      subscribe: () => () => {},
+      subscribe: (listener) => {
+        gitListeners.push(listener);
+        return () => {
+          const index = gitListeners.indexOf(listener);
+          if (index > -1) gitListeners.splice(index, 1);
+        };
+      },
       state: () => ({
         ...git,
         files: git.files.map((file) => ({ ...file })),
@@ -90,15 +102,41 @@ function createFakeRuntime(initial) {
       cancel: () => calls.push(["cancel"]),
       previewSelection: () => calls.push(["previewSelection"]),
       back: () => calls.push(["back"]),
-      askEgress: () => calls.push(["askEgress"]),
       approveEgress: () => calls.push(["approveEgress"]),
       editMessage: () => calls.push(["editMessage"]),
+      // The message field reports what is typed and the flow holds it: recording
+      // the value is what lets a test read the multi-line text back.
+      draftChanged(value) {
+        git.draft = value;
+        calls.push(["draftChanged", value]);
+        return true;
+      },
+      saveMessage(text) {
+        const typed = typeof text === "string" ? text : git.draft;
+        calls.push(["saveMessage", typed]);
+        if (!String(typed).trim()) {
+          git.message = "";
+          git.step = "preview";
+          notifyGit();
+          return null;
+        }
+        git.message = String(typed).trim();
+        git.draft = git.message;
+        git.step = "confirm";
+        notifyGit();
+        return git.message;
+      },
+      cancelMessage() {
+        calls.push(["cancelMessage"]);
+        git.step = git.message ? "confirm" : "preview";
+        return git.message || null;
+      },
       confirm: () => calls.push(["confirm"]),
       confirmPush: () => calls.push(["confirmPush"]),
       pushNow: () => calls.push(["pushNow"]),
     },
     notify() {
-      for (const listener of [...listeners]) listener();
+      for (const listener of Array.from(listeners)) listener();
     },
     manager: { subscribe: () => () => {} },
     rows: () => state.board,
@@ -289,6 +327,50 @@ function createFakeRuntime(initial) {
       },
     },
   };
+}
+
+// The log dialog reads one run through the runtime. This stand-in keeps the
+// snapshot behind a getter and changes it only when a scenario says so, which is
+// what the real manager does from its own events.
+function createFakeLogRuntime(initial = {}) {
+  const listeners = new Set();
+  const calls = [];
+  const clone = (value) =>
+    value
+      ? { ...value, lines: Array.isArray(value.lines) ? [...value.lines] : [] }
+      : undefined;
+  let snapshot = clone(initial.snapshot);
+  const runtime = {
+    calls,
+    runKey: initial.runKey ?? "runner-1",
+    context: {
+      theme,
+      ui: { dialog: { clear: () => calls.push(["dialog.clear"]) } },
+    },
+    manager: {
+      subscribe(listener) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    },
+    // The shared result collector reads these once per scenario. This runtime
+    // has no sidebar state of its own, so it reports empty collections instead
+    // of leaving the collector to guess.
+    gitFlow: { state: () => null },
+    state: { settings: [], editors: [] },
+    keymap: { samples: [], sample() {} },
+    snapshot: () => clone(snapshot),
+    requestStop: (key) => calls.push(["requestStop", key]),
+    send: (key, data) => calls.push(["send", key, data]),
+    setSnapshot(next, notify = true) {
+      snapshot = clone(next);
+      if (notify) {
+        for (const listener of Array.from(listeners)) listener();
+      }
+    },
+    logClosed: false,
+  };
+  return runtime;
 }
 
 function item(id, label) {
@@ -1303,17 +1385,17 @@ gitScenario("git-files-longpath-70", {
   },
 });
 
-// A diff line past 200 columns must not be cut at display time: the egress step
+// A diff line past 200 columns must not be cut at display time: the preview
 // shows the exact frozen diff, so the tail of the line has to be reachable. The
 // narrow viewport wraps the long line and the lines before it push the tail
 // below the fold, so only scrolling can reveal the marker.
 const LONG_LINE_TAIL = "END-OF-LONG-DIFF-LINE-9f3c";
 const longDiffLine = `+${"a".repeat(220)}${LONG_LINE_TAIL}`;
-gitScenario("git-egress-longline-36", {
+gitScenario("git-preview-longline-36", {
   width: 36,
   height: 20,
   git: {
-    step: "egress",
+    step: "preview",
     selection: ["src/app.js"],
     preview: {
       stat: "1 file changed",
@@ -1328,13 +1410,390 @@ gitScenario("git-egress-longline-36", {
     // The diff scrollbox is the only scrollable box on this screen. Scroll
     // inside its bounds, not over the buttons below it.
     const box = measure(setup.renderer.root).find((node) => node.ctor.includes("ScrollBox"));
-    if (!box) throw new Error("the egress screen has no diff scrollbox");
+    if (!box) throw new Error("the preview screen has no diff scrollbox");
     capture("before-scroll");
     for (let index = 0; index < 80; index += 1) {
       await setup.mockMouse.scroll(box.x + 2, box.y + 1, "down");
     }
     await setup.renderOnce();
     capture("after-scroll");
+  },
+});
+
+gitScenario("git-preview-native-70", {
+  width: 76,
+  height: 20,
+  git: {
+    step: "preview",
+    generator: {
+      source: "openai",
+      providerID: "openai",
+      id: "gpt-6-luna",
+      providerName: "OpenAI",
+      modelName: "Luna",
+      verified: true,
+    },
+    selection: ["src/app.js"],
+    preview: { stat: "1 file changed", diff: "+one line\n+another line\n" },
+  },
+});
+
+// A host with no provider or model list keeps the fixed OpenCodex default. The
+// review must call it the assumed default, never a verified route.
+gitScenario("git-preview-legacy-70", {
+  width: 76,
+  height: 22,
+  git: {
+    step: "preview",
+    generator: {
+      source: "opencodex",
+      providerID: "opencodex",
+      id: "gpt-6-luna",
+      variant: "low",
+      providerName: "OpenCodex",
+      modelName: "Luna",
+      verified: false,
+    },
+    selection: ["src/app.js"],
+    preview: { stat: "1 file changed", diff: "+one line\n+another line\n" },
+  },
+});
+
+// A proxy provider with a long name, at a width where the disclosure paragraph
+// and the file list both wrap. The disclosure, the file list, the stat and the
+// diff share the review scroll box; the actions must stay in the viewport at
+// both ends of that scroll.
+gitScenario("git-preview-narrow-32", {
+  width: 32,
+  height: 26,
+  git: {
+    step: "preview",
+    generator: {
+      source: "proxy",
+      providerID: "opencode-proxy",
+      id: "luna-large-preview",
+      providerName: "OpenCode Proxy",
+      modelName: "Luna",
+      variant: "high",
+    },
+    selection: ["src/app.js", "src/features/checkout/use-checkout.ts"],
+    preview: { stat: "2 files changed", diff: "+one line\n+another line\n" },
+  },
+  async after(setup, runtime, capture) {
+    const box = measure(setup.renderer.root).find((node) => node.ctor.includes("ScrollBox"));
+    if (!box) throw new Error("the preview has no review scroll box");
+    for (let index = 0; index < 80; index += 1) {
+      await setup.mockMouse.scroll(box.x + 2, box.y + 1, "down");
+    }
+    await setup.renderOnce();
+    capture("after-scroll");
+  },
+});
+
+// The final confirmation after the editor. The message can be much taller than
+// the terminal, so it lives in the review scroll box: the subject is on screen
+// at the start, the tail is reachable by scrolling, and Commit never leaves the
+// bottom of the dialog.
+const confirmMessageBody = Array.from(
+  { length: 24 },
+  (_, index) =>
+    `CONFIRM-BODY-ROW-${index + 1}: the final review can scroll every row of a long generated message.`,
+).join("\n");
+const confirmMessage = `confirm the whole message is readable\n\n${confirmMessageBody}\nCONFIRM-BODY-TAIL-5e8b`;
+
+gitScenario("git-confirm-longmessage-70", {
+  height: 22,
+  git: {
+    step: "confirm",
+    selection: ["src/app.js"],
+    message: confirmMessage,
+    preview: { stat: "1 file changed", diff: "+one line\n+another line\n" },
+  },
+  async after(setup, runtime, capture) {
+    capture("before-scroll");
+    const box = measure(setup.renderer.root).find((node) => node.ctor.includes("ScrollBox"));
+    if (!box) throw new Error("the confirmation has no review scroll box");
+    for (let index = 0; index < 80; index += 1) {
+      await setup.mockMouse.scroll(box.x + 2, box.y + 1, "down");
+    }
+    await setup.renderOnce();
+    capture("after-scroll");
+  },
+});
+
+// The message editor. A generated subject, a blank line and a body have to live
+// in one field: the host prompt drew a single line, so this screen is where the
+// whole message, its wrap, and its scroll have to work.
+const longMessageBody =
+  "Body explains why the spacing mattered and what the review looked like before it changed at all.";
+
+gitScenario("git-edit-multiline-70", {
+  height: 22,
+  git: {
+    step: "edit",
+    selection: ["src/app.js"],
+    message: `add the header spacing\n\n${longMessageBody}`,
+    preview: { stat: "1 file changed", diff: "+one line\n+another line\n" },
+  },
+});
+
+// Typing in the field: a plain Return is a newline, never a save, and the
+// message is handed to the flow only when an explicit save key asks for it.
+gitScenario("git-edit-typing-70", {
+  height: 22,
+  git: {
+    step: "edit",
+    selection: ["src/app.js"],
+    message: "add the header spacing",
+    preview: { stat: "1 file changed", diff: "+one line\n" },
+  },
+  async after(setup, runtime, capture) {
+    await setup.mockInput.pressKey("\u001B[F");
+    await setup.renderOnce();
+    await type(setup, " and a body");
+    await pressEnter(setup);
+    await type(setup, "second line of the body");
+    capture("after-typing");
+    // The host binds meta+return (Alt+Enter) to submit; a bare Return stays a
+    // newline, so the message cannot be saved just by pressing Return.
+    await setup.mockInput.pressEnter({ meta: true });
+    await setup.renderOnce();
+    capture("after-save");
+  },
+});
+
+// The explicit controls. Both are on screen next to the field, and neither one
+// commits anything by itself.
+gitScenario("git-edit-save-button-70", {
+  height: 22,
+  git: {
+    step: "edit",
+    selection: ["src/app.js"],
+    message: "add the header spacing\n\nBody explains why.",
+    preview: { stat: "1 file changed", diff: "+one line\n" },
+  },
+  async after(setup, runtime, capture) {
+    await clickOn(setup, "Save message", "Save message");
+    capture("after-save");
+  },
+});
+
+gitScenario("git-edit-cancel-70", {
+  height: 22,
+  git: {
+    step: "edit",
+    selection: ["src/app.js"],
+    message: "add the header spacing\n\nBody explains why.",
+    preview: { stat: "1 file changed", diff: "+one line\n" },
+  },
+  async after(setup, runtime, capture) {
+    await type(setup, " thrown away");
+    capture("after-typing");
+    await clickOn(setup, "Cancel", "Cancel");
+    capture("after-cancel");
+  },
+});
+
+// A message longer than the field can show: the field takes the body height,
+// scrolls with the caret, and still hands the whole text back on save.
+const overflowMessageBody = [
+  "OVERFLOW-BODY-START: the review read every wrapped row and flagged only the spacing before the first paragraph.",
+  "The body then keeps going for many more rows so that the field cannot show it all at once and the caret has to scroll.",
+  "Nothing here is special, which is the point: a long commit body is normal, and it must never be cut short or replaced by a marker.",
+  "The field now owns the body instead of a fixed six rows. It grows with the dialog, not with the message, so the footer cannot be pushed off screen.",
+  "The frozen diff belongs to the review that comes before and after this editor. Repeating it here stole the rows the message needed.",
+  "Home returns to the top and End reaches the tail. The rows between them stay reachable, and the text is never replaced by an ellipsis.",
+  "The last rows before the tail name the end marker, so a scrolled field can be told apart from a truncated one.",
+  "OVERFLOW-BODY-END-7c1a",
+].join("\n");
+
+gitScenario("git-edit-overflow-70", {
+  height: 22,
+  git: {
+    step: "edit",
+    selection: ["src/app.js"],
+    message: `add the header spacing\n\n${overflowMessageBody}`,
+    preview: { stat: "1 file changed", diff: "+one line\n" },
+  },
+  async after(setup, runtime, capture) {
+    // The field opens at the top so the subject is the first thing reviewed.
+    // End moves the caret and the viewport to the tail, where typing continues.
+    await setup.mockInput.pressKey("\u001B[F");
+    await setup.renderOnce();
+    capture("after-end");
+    await type(setup, "\nOVERFLOW-TYPED-TAIL-4b2d");
+    await setup.renderOnce();
+    capture("after-typing");
+    await setup.mockInput.pressEnter({ meta: true });
+    await setup.renderOnce();
+    capture("after-save");
+  },
+});
+
+// The message from the reported screenshots: a full subject and three
+// paragraphs, well over 1000 characters. It is the fixture for the terminal
+// sizes the user actually runs, so the field viewport and every hidden row are
+// measured against real text rather than a short sample.
+const longReviewMessage = [
+  "Resolve and disclose the commit message generator before diff sharing",
+  "",
+  "Preflight runs before anything leaves this machine. The provider and model are resolved once, then the exact destination is shown next to the frozen diff. The selection stays unchanged while the message is drafted, so the review cannot drift away from what was sent. Every sentence in the message remains readable, and the frozen diff stays exactly as it was reviewed. The wording names the route and the model, and it never implies that a second send step exists.",
+  "",
+  "The editor is a real multi-line field. Enter adds a line, Alt+Enter saves, and Cancel keeps the draft that existed before the editor opened. The field opens at the subject, End reaches the tail, and Home returns to the top. Saving sends the whole text, not only the rows on screen. A line counter names the caret row and the total row count, because the field itself has no visible scrollbar. If the host cannot report its route, the preview says that the destination is assumed, not verified.",
+  "",
+  "The review keeps the message and the frozen diff in one bounded scroll area. A fixed line names the scroll and End and Home keys, the message ends with an explicit marker, and the frozen diff starts under its own label. Commit stays in the footer while the body scrolls, and editing never commits on its own. The footer never scrolls away, so the last paragraph and the first diff row can be told apart without losing the controls.",
+  "",
+  "LONG-MESSAGE-TAIL-9a4c",
+].join("\n");
+const longEditScenario = (name, width, height) =>
+  gitScenario(name, {
+    width,
+    height,
+    git: {
+      step: "edit",
+      selection: ["src/app.js"],
+      message: longReviewMessage,
+      // The edit screen no longer renders the diff. The saved review uses the
+      // same short diff as the direct confirm scenario so its tail, the end
+      // marker, and the Frozen diff label can share one viewport.
+      preview: { stat: "1 file changed, 2 insertions(+)", diff: "+one line\n+another line\n+DIFF-TAIL-4f2e" },
+    },
+    async after(setup, runtime, capture) {
+      // The field opens at the subject. End moves the caret and the field's
+      // viewport to the tail; Home puts both back at the top.
+      await setup.mockInput.pressKey("\u001B[F");
+      await setup.renderOnce();
+      capture("after-end");
+      await setup.mockInput.pressKey("\u001B[H");
+      await setup.renderOnce();
+      capture("after-home");
+      await setup.mockInput.pressKey("\u001B[F");
+      await setup.renderOnce();
+      await setup.mockInput.pressEnter({ meta: true });
+      await setup.renderOnce();
+      capture("after-save");
+      // The saved review still scrolls: the exact tail must be reachable there
+      // too, and the footer must stay on screen.
+      await setup.mockInput.pressKey("\u001B[F");
+      await setup.renderOnce();
+      capture("after-save-end");
+    },
+  });
+
+longEditScenario("git-edit-long-100x30", 100, 30);
+longEditScenario("git-edit-long-70x22", 70, 22);
+longEditScenario("git-edit-long-32x26", 32, 26);
+
+const longConfirmScenario = (name, width, height) =>
+  gitScenario(name, {
+    width,
+    height,
+    git: {
+      step: "confirm",
+      selection: ["src/app.js"],
+      message: longReviewMessage,
+      // A short diff keeps the message end and the diff label in one viewport
+      // at the tail, which is exactly the boundary the screenshot confused.
+      preview: { stat: "1 file changed, 2 insertions(+)", diff: "+one line\n+another line\n+DIFF-TAIL-4f2e" },
+    },
+    async after(setup, runtime, capture) {
+      capture("before-scroll");
+      const box = measure(setup.renderer.root).find((node) => node.ctor.includes("ScrollBox"));
+      if (!box) throw new Error("the confirmation has no review scroll box");
+      // Both stated controls are exercised: End jumps to the tail, Home returns.
+      await setup.mockInput.pressKey("\u001B[F");
+      await setup.renderOnce();
+      capture("after-end");
+      await setup.mockInput.pressKey("\u001B[H");
+      await setup.renderOnce();
+      capture("after-home");
+      for (let index = 0; index < 100; index += 1) {
+        await setup.mockMouse.scroll(box.x + 2, box.y + 1, "down");
+      }
+      await setup.renderOnce();
+      capture("after-scroll");
+    },
+  });
+
+longConfirmScenario("git-confirm-long-100x30", 100, 30);
+longConfirmScenario("git-confirm-long-70x22", 70, 22);
+longConfirmScenario("git-confirm-long-32x26", 32, 26);
+
+// A run the dialog is opened on, then the same snapshot after its terminal
+// event, then no snapshot at all. The output stays in the terminal snapshot, so
+// the fallback has to be a statement about tracking, not about the process.
+const retainedLogLines = ["BUILD-START-8f2c", "compiling src/app.js", "BUILD-TAIL-4d1e"];
+const runningLog = {
+  key: "runner-1",
+  actionId: "build-mobile",
+  label: "Build mobile",
+  display: "npm run build",
+  cwd: "/workspace/demo",
+  pid: 4242,
+  stdin: true,
+  status: "running",
+  running: true,
+  exitCode: undefined,
+  signal: undefined,
+  error: null,
+  stopError: null,
+  stopping: false,
+  orphaned: false,
+  startedAt: 0,
+  elapsedMs: 4200,
+  lineCount: retainedLogLines.length,
+  progress: "building 2/3",
+  lines: retainedLogLines,
+};
+const terminalLog = {
+  ...runningLog,
+  status: "exited",
+  running: false,
+  exitCode: 0,
+  elapsedMs: 5300,
+};
+
+function logScenario(name, options) {
+  scenario(name, {
+    width: options.width ?? 70,
+    // The dialog needs the rows for its fixed header, progress and footer. A
+    // shorter box lets the header rows compress into each other.
+    height: options.height ?? 26,
+    runtime: createFakeLogRuntime({ snapshot: options.snapshot, runKey: options.runKey }),
+    build(runtime) {
+      return (
+        <box flexDirection="column" width="100%" height="100%">
+          {LogDialog({
+            context: runtime.context,
+            runtime,
+            runKey: runtime.runKey,
+            onClose: () => {
+              runtime.logClosed = true;
+              runtime.calls.push(["dialog.close"]);
+            },
+          })}
+        </box>
+      );
+    },
+    after: options.after,
+  });
+}
+
+logScenario("log-dialog-lifecycle-70", {
+  snapshot: runningLog,
+  async after(setup, runtime, capture) {
+    capture("running");
+    // The manager's subscription redraws a run that finished while its dialog
+    // stayed open; the retained output is never dropped.
+    runtime.setSnapshot(terminalLog);
+    await setup.renderOnce();
+    capture("terminal");
+    // The snapshot disappears without a notification. The dialog's one second
+    // timer is what notices, so the fallback is drawn without a manager event.
+    runtime.setSnapshot(undefined, false);
+    await new Promise((resolve) => setTimeout(resolve, 1250));
+    await setup.renderOnce();
+    capture("missing");
   },
 });
 
@@ -1346,6 +1805,7 @@ for (const entry of scenarios) {
     height: entry.height,
   });
   await setup.renderOnce();
+  const gitBefore = runtime.gitFlow.state();
   const frames = {};
   const nodesByFrame = {};
   const capture = (name) => {
@@ -1357,6 +1817,9 @@ for (const entry of scenarios) {
   };
   capture("frame");
   if (entry.after) await entry.after(setup, runtime, capture);
+  // Destroy before reading the call log: an unmount cleanup is part of what a
+  // scenario measures, and the log dialog reports its own unmount there.
+  setup.renderer.destroy();
   results.push({
     name: entry.name,
     width: entry.width,
@@ -1368,13 +1831,17 @@ for (const entry of scenarios) {
     nodesByFrame,
     cells: Object.fromEntries(Object.entries(frames).map(([key, frame]) => [key, frameCells(frame)])),
     calls: runtime.calls,
+    gitBefore,
+    git: runtime.gitFlow.state(),
     settings: runtime.state.settings,
     // What the view registered with the host keymap on each run, plus what the
     // runtime reported as editable.
     keymap: runtime.keymap.samples,
     editors: runtime.state.editors,
+    // The optional lifecycle notification the runtime can use to forget this
+    // popup before it disposes the manager.
+    logClosed: runtime.logClosed ?? false,
   });
-  setup.renderer.destroy();
 }
 
 const payload = `${MARKER}\n${JSON.stringify({ scenarios: results, misses })}\n`;

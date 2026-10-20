@@ -791,6 +791,11 @@ export function createRunnerManager(options = {}) {
   const maxLineChars = options.maxLineChars ?? 400;
   const killGraceMs = options.killGraceMs ?? 5000;
   const notifyMs = options.notifyMs ?? 120;
+  // After the grace SIGKILL the group can take a moment to disappear. Probe a
+  // bounded number of times so the stopped state stops claiming leftovers as
+  // soon as the group is provably gone, without a permanent watcher.
+  const gonePollMs = options.gonePollMs ?? 25;
+  const gonePollLimit = options.gonePollLimit ?? 40;
 
   const runs = new Map();
   const listeners = new Set();
@@ -825,6 +830,40 @@ export function createRunnerManager(options = {}) {
 
   const keyFor = (actionId, cwd) => `${actionId}\u0000${path.resolve(cwd || ".")}`;
 
+  // A stop is only pending while its group can still exist. This is the single
+  // place that clears the pending flags, so a snapshot never reports leftovers
+  // for a group that has provably disappeared.
+  function clearStopState(run) {
+    if (!run.stopping && !run.orphaned) return false;
+    run.stopping = false;
+    run.stoppingSince = undefined;
+    run.orphaned = false;
+    if (run.goneTimer) {
+      clearTimeout(run.goneTimer);
+      run.goneTimer = undefined;
+    }
+    return true;
+  }
+
+  // Bounded confirmation after SIGKILL: the leader may already have exited, so
+  // no exit event can announce that the last descendant finally died. Every
+  // probe keeps the same pid/group identity guard as a signal.
+  function scheduleGoneCheck(run) {
+    if (run.goneTimer || run.goneChecks >= gonePollLimit) return;
+    run.goneTimer = setTimeout(() => {
+      run.goneTimer = undefined;
+      run.goneChecks += 1;
+      if (!run.stopping) return;
+      if (groupOwned(run)) {
+        scheduleGoneCheck(run);
+        return;
+      }
+      clearStopState(run);
+      emit();
+    }, gonePollMs);
+    run.goneTimer.unref?.();
+  }
+
   function start(spec) {
     const cwd = path.resolve(spec.cwd || ".");
     const key = keyFor(spec.actionId, cwd);
@@ -855,6 +894,8 @@ export function createRunnerManager(options = {}) {
       error: undefined,
       signalError: undefined,
       killTimer: undefined,
+      goneTimer: undefined,
+      goneChecks: 0,
       pgid: undefined,
       leaderStart: undefined,
       groupGone: false,
@@ -867,7 +908,7 @@ export function createRunnerManager(options = {}) {
     try {
       child = spawn(run.command, run.args, {
         cwd,
-        env: { ...env, ...(spec.env ?? {}) },
+        env: { ...env, ...spec.env },
         stdio: ["pipe", "pipe", "pipe"],
         shell: false,
         // An owned process group: stopping a run must reach the descendants
@@ -899,16 +940,19 @@ export function createRunnerManager(options = {}) {
       run.endedAt = now();
       // A stop grace timer must outlive the leader when descendants are still
       // in the group, so it is only dropped once the group is provably gone.
-      if (run.killTimer && (!run.stopping || !groupOwned(run))) {
+      const owned = groupOwned(run);
+      if (run.killTimer && (!run.stopping || !owned)) {
         clearTimeout(run.killTimer);
         run.killTimer = undefined;
       }
+      // The stop's group is gone: the stop no longer has leftovers to report.
+      if (run.stopping && !owned) clearStopState(run);
       // A leader can also exit on its own while the descendants it spawned keep
       // the group alive (a wrapper script that backgrounds a server). Take over
       // that lingering group here, inside a bounded grace window, instead of
       // losing ownership silently: SIGTERM now, the scheduled grace SIGKILL
       // after. A stop that already owns the group is left alone.
-      if (status !== "stopped" && !run.stopping && groupOwned(run)) {
+      if (status !== "stopped" && !run.stopping && owned) {
         run.stopping = true;
         run.stoppingSince = run.endedAt;
         run.orphaned = true;
@@ -1020,12 +1064,24 @@ export function createRunnerManager(options = {}) {
   // group is still provably ours, so a recycled group id is never hit.
   function escalate(run) {
     if (!run.stopping) return;
-    if (!groupOwned(run)) return;
+    if (!groupOwned(run)) {
+      if (clearStopState(run)) emit();
+      return;
+    }
     const result = sendSignal(run, "SIGKILL");
-    if (!result.ok && result.code !== "ESRCH") {
+    if (!result.ok && result.code === "ESRCH") {
+      run.groupGone = true;
+      if (clearStopState(run)) emit();
+      return;
+    }
+    if (!result.ok) {
       run.signalError = describeSignalFailure(result.code, result.message);
       emit();
+      return;
     }
+    // The kill is asynchronous even for our group: confirm the disappearance
+    // rather than leaving the row stuck on "leftovers still stopping".
+    scheduleGoneCheck(run);
   }
 
   function stop(key) {
@@ -1035,6 +1091,7 @@ export function createRunnerManager(options = {}) {
     if (run.stopping) return false;
     run.stopping = true;
     run.stoppingSince = now();
+    run.goneChecks = 0;
     // Mark the stop intent before signalling, so a child that exits inside the
     // signal call is labelled stopped rather than failed.
     run.stopped = true;
@@ -1042,6 +1099,9 @@ export function createRunnerManager(options = {}) {
     if (!result.ok && result.code === "ESRCH") {
       // The process/group is already gone; nothing to escalate.
       run.groupGone = true;
+      // Clear the stale stop error so the retry is not counted as a failure.
+      run.signalError = undefined;
+      clearStopState(run);
       emit();
       return true;
     }
@@ -1055,6 +1115,7 @@ export function createRunnerManager(options = {}) {
       emit();
       return false;
     }
+    run.signalError = undefined;
     if (run.status === "running") scheduleKill(run);
     emit();
     return true;
@@ -1092,6 +1153,11 @@ export function createRunnerManager(options = {}) {
   function snapshot(key, tailCount) {
     const run = runs.get(key);
     if (!run) return undefined;
+    // A finished stop whose group is now gone must read truthfully even if the
+    // bounded confirmation timer has not fired yet.
+    if (run.stopping && run.status !== "running" && !groupOwned(run)) {
+      clearStopState(run);
+    }
     return {
       key: run.key,
       actionId: run.actionId,
@@ -1143,6 +1209,10 @@ export function createRunnerManager(options = {}) {
       if (run.killTimer) {
         clearTimeout(run.killTimer);
         run.killTimer = undefined;
+      }
+      if (run.goneTimer) {
+        clearTimeout(run.goneTimer);
+        run.goneTimer = undefined;
       }
     }
     if (notifyTimer) {

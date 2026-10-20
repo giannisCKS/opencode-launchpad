@@ -326,7 +326,7 @@ export function createButtonConfigStore(options = {}) {
   }
 
   function notify(reason) {
-    for (const listener of [...listeners]) {
+    for (const listener of Array.from(listeners)) {
       try {
         listener(reason);
       } catch {
@@ -603,7 +603,11 @@ export function createButtonConfigStore(options = {}) {
     // `listener(reason)` with reason "change" or "error". The disposer removes
     // the listener and never throws.
     subscribe(listener) {
-      if (typeof listener !== "function") return () => {};
+      if (typeof listener !== "function") {
+        return () => {
+          // Intended no-op: a non-function subscriber has nothing to remove.
+        };
+      }
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
