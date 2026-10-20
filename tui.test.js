@@ -1,10 +1,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { createProjectDetector, dialogKeyLayer, discoverActions } from "./runners.js";
+import {
+  createProjectDetector,
+  dialogKeyLayer,
+  discoverActions,
+} from "./runners.js";
 import { createGitActions } from "./git.js";
 import { PLUGIN_ID, setupWith } from "./tui.js";
 
@@ -25,13 +38,17 @@ function fixture(files) {
   for (const [rel, content] of Object.entries(files)) {
     const file = path.join(root, rel);
     mkdirSync(path.dirname(file), { recursive: true });
-    writeFileSync(file, typeof content === "string" ? content : JSON.stringify(content, null, 2));
+    writeFileSync(
+      file,
+      typeof content === "string" ? content : JSON.stringify(content, null, 2),
+    );
   }
   return root;
 }
 
 test.after(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  for (const root of roots.splice(0))
+    rmSync(root, { recursive: true, force: true });
 });
 
 function createFakeSpawn() {
@@ -42,7 +59,7 @@ function createFakeSpawn() {
     if (spawn.fail) throw new Error("spawn exploded");
     const child = new EventEmitter();
     const writes = [];
-    child.pid = (nextPid += 1);
+    child.pid = nextPid += 1;
     children.set(child.pid, child);
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
@@ -129,7 +146,10 @@ function createContext({
   const context = {
     theme: {
       text: { base: "#ffffff", muted: "#888888", error: "#ff0000" },
-      background: { action: { primary: { focused: "#333333" } }, raised: { base: "#222222" } },
+      background: {
+        action: { primary: { focused: "#333333" } },
+        raised: { base: "#222222" },
+      },
     },
     location: { directory: locationDirectory },
     // Legacy v1 host snapshot fallback; the current host has no `state`. It is
@@ -139,7 +159,11 @@ function createContext({
         diff(sessionID) {
           if (!snapshotFiles) return undefined;
           calls.snapshots.push(sessionID);
-          return (snapshotFiles[sessionID] ?? []).map((file) => ({ file, additions: 1, deletions: 0 }));
+          return (snapshotFiles[sessionID] ?? []).map((file) => ({
+            file,
+            additions: 1,
+            deletions: 0,
+          }));
         },
       },
     },
@@ -198,8 +222,13 @@ function createContext({
                   "unsupported message list request: expected { sessionID, limit, order, cursor, type }",
                 );
               }
-              if (typeof options?.sessionID !== "string" || options.type !== "user") {
-                throw new Error("message list requires sessionID and type: 'user'");
+              if (
+                typeof options?.sessionID !== "string" ||
+                options.type !== "user"
+              ) {
+                throw new Error(
+                  "message list requires sessionID and type: 'user'",
+                );
               }
               if (options.cursor !== undefined && options.order !== undefined) {
                 throw new Error("order must not be combined with cursor");
@@ -211,13 +240,20 @@ function createContext({
                 (a, b) => (a?.time?.created ?? 0) - (b?.time?.created ?? 0),
               );
               if (options.order === "desc") ordered.reverse();
-              const at = typeof options.cursor === "string" ? Number(options.cursor.slice(1)) : 0;
+              const at =
+                typeof options.cursor === "string"
+                  ? Number(options.cursor.slice(1))
+                  : 0;
               if (typeof options.cursor === "string" && !Number.isInteger(at)) {
                 throw new Error("bad cursor");
               }
-              const limit = typeof options.limit === "number" ? options.limit : ordered.length;
+              const limit =
+                typeof options.limit === "number"
+                  ? options.limit
+                  : ordered.length;
               const page = ordered.slice(at, at + limit);
-              const next = at + limit < ordered.length ? `c${at + limit}` : null;
+              const next =
+                at + limit < ordered.length ? `c${at + limit}` : null;
               return { data: page, cursor: { previous: null, next } };
             },
           },
@@ -253,7 +289,10 @@ function createContext({
                 calls.providers.push(options);
                 if (providerListGate) await providerListGate(options);
                 if (providerListThrows) throw new Error("provider list failed");
-                return { location: { directory: locationDirectory }, data: providers };
+                return {
+                  location: { directory: locationDirectory },
+                  data: providers,
+                };
               },
             },
           }),
@@ -265,7 +304,10 @@ function createContext({
                 calls.models.push(options);
                 if (modelListGate) await modelListGate(options);
                 if (modelListThrows) throw new Error("model list failed");
-                return { location: { directory: locationDirectory }, data: models };
+                return {
+                  location: { directory: locationDirectory },
+                  data: models,
+                };
               },
             },
           }),
@@ -273,7 +315,9 @@ function createContext({
         // A fabricated route: calling it is a regression.
         async messages() {
           calls.invalid.push("session.messages");
-          throw new Error("session.messages is not part of the @opencode/client contract");
+          throw new Error(
+            "session.messages is not part of the @opencode/client contract",
+          );
         },
         // Native `parentID` child listing. `sessionChildren` maps a parent id to
         // its direct children; a string entry becomes `{ id, parentID }`, an
@@ -286,17 +330,28 @@ function createContext({
                 calls.sessions.push(options);
                 for (const key of ["path", "sessionID", "before"]) {
                   if (options?.[key] !== undefined) {
-                    throw new Error(`unsupported session list request key: ${key}`);
+                    throw new Error(
+                      `unsupported session list request key: ${key}`,
+                    );
                   }
                 }
-                if (typeof options?.parentID !== "string" || !options.parentID) {
+                if (
+                  typeof options?.parentID !== "string" ||
+                  !options.parentID
+                ) {
                   throw new Error("session list requires parentID");
                 }
-                if (options.cursor !== undefined && options.order !== undefined) {
+                if (
+                  options.cursor !== undefined &&
+                  options.order !== undefined
+                ) {
                   throw new Error("order must not be combined with cursor");
                 }
                 if (sessionListGate) await sessionListGate(options);
-                if (sessionListThrows || sessionListFailFor.includes(options.parentID)) {
+                if (
+                  sessionListThrows ||
+                  sessionListFailFor.includes(options.parentID)
+                ) {
                   throw new Error("session list failed");
                 }
                 if (sessionListMalformed) return { data: "not-a-list" };
@@ -307,16 +362,30 @@ function createContext({
                 const source = sessionChildren[options.parentID] ?? [];
                 const records = source.map((entry) =>
                   typeof entry === "string"
-                    ? { id: entry, parentID: options.parentID, directory: childDirectory }
+                    ? {
+                        id: entry,
+                        parentID: options.parentID,
+                        directory: childDirectory,
+                      }
                     : entry,
                 );
-                const at = typeof options.cursor === "string" ? Number(options.cursor.slice(1)) : 0;
-                if (typeof options.cursor === "string" && !Number.isInteger(at)) {
+                const at =
+                  typeof options.cursor === "string"
+                    ? Number(options.cursor.slice(1))
+                    : 0;
+                if (
+                  typeof options.cursor === "string" &&
+                  !Number.isInteger(at)
+                ) {
                   throw new Error("bad cursor");
                 }
-                const limit = typeof options.limit === "number" ? options.limit : records.length;
+                const limit =
+                  typeof options.limit === "number"
+                    ? options.limit
+                    : records.length;
                 const page = records.slice(at, at + limit);
-                const next = at + limit < records.length ? `c${at + limit}` : null;
+                const next =
+                  at + limit < records.length ? `c${at + limit}` : null;
                 return { data: page, cursor: { previous: null, next } };
               },
             }),
@@ -328,8 +397,12 @@ function createContext({
             }
           }
           if (diffThrows) throw new Error("session diff failed");
-          if (options?.from !== undefined && messageDiffThrows) throw new Error("message diff failed");
-          if (options?.from !== undefined && messageDiffThrowsFor.includes(options.from)) {
+          if (options?.from !== undefined && messageDiffThrows)
+            throw new Error("message diff failed");
+          if (
+            options?.from !== undefined &&
+            messageDiffThrowsFor.includes(options.from)
+          ) {
             throw new Error("message diff failed");
           }
           const files =
@@ -407,13 +480,29 @@ function fakeGit(options = {}) {
   const upstream = options.upstream ?? "origin/main";
   const pushUrl = options.pushUrl ?? "git@github.com:acme/repo.git";
   const status = options.status ?? "";
-  const patch = options.patch ?? "diff --git a/src/a.ts b/src/a.ts\n+one line\n";
-  const stat = options.stat ?? " src/a.ts | 1 +\n 1 file changed, 1 insertion(+)\n";
+  const patch =
+    options.patch ?? "diff --git a/src/a.ts b/src/a.ts\n+one line\n";
+  const stat =
+    options.stat ?? " src/a.ts | 1 +\n 1 file changed, 1 insertion(+)\n";
   const calls = [];
   let head = options.head ?? COMMIT_ONE;
   let committedOnce = false;
-  const ok = (stdout) => ({ ok: true, code: 0, spawnError: null, timedOut: false, stdout, stderr: "" });
-  const bad = (code, stderr) => ({ ok: false, code, spawnError: null, timedOut: false, stdout: "", stderr });
+  const ok = (stdout) => ({
+    ok: true,
+    code: 0,
+    spawnError: null,
+    timedOut: false,
+    stdout,
+    stderr: "",
+  });
+  const bad = (code, stderr) => ({
+    ok: false,
+    code,
+    spawnError: null,
+    timedOut: false,
+    stdout: "",
+    stderr,
+  });
 
   const exec = async ({ file, args, cwd, env, input }) => {
     const line = args.join(" ");
@@ -423,34 +512,44 @@ function fakeGit(options = {}) {
       if (options.notARepo) return bad(128, "fatal: not a git repository");
       return ok(`${root}\n`);
     }
-    if (line === "status --porcelain=v2 -z --untracked-files=all") return ok(status);
-    if (line === "--version") return ok(options.gitVersion ?? "git version 2.40.0\n");
-    if (line === "symbolic-ref --quiet HEAD") return ok(`refs/heads/${branch}\n`);
+    if (line === "status --porcelain=v2 -z --untracked-files=all")
+      return ok(status);
+    if (line === "--version")
+      return ok(options.gitVersion ?? "git version 2.40.0\n");
+    if (line === "symbolic-ref --quiet HEAD")
+      return ok(`refs/heads/${branch}\n`);
     if (line === "symbolic-ref --quiet --short HEAD") return ok(`${branch}\n`);
-    if (line === "rev-parse --git-path hooks") return ok(`${path.join(root, ".git", "hooks")}\n`);
+    if (line === "rev-parse --git-path hooks")
+      return ok(`${path.join(root, ".git", "hooks")}\n`);
     if (line === "rev-parse --show-object-format") return ok("sha1\n");
     if (line === "rev-parse --verify --quiet HEAD") return ok(`${head}\n`);
-    if (line === "rev-parse --abbrev-ref --symbolic-full-name @{upstream}") return ok(`${upstream}\n`);
+    if (line === "rev-parse --abbrev-ref --symbolic-full-name @{upstream}")
+      return ok(`${upstream}\n`);
     if (line === "rev-parse --abbrev-ref --symbolic-full-name @{push}") {
       if (options.noPushTarget) return bad(1, "");
       return ok(`${upstream}\n`);
     }
-    if (line.startsWith("rev-list --count")) return ok(`${options.outgoing ?? "0"}\n`);
-    if (line.startsWith("rev-list -n")) return ok(options.hashes?.join("\n") ?? "");
+    if (line.startsWith("rev-list --count"))
+      return ok(`${options.outgoing ?? "0"}\n`);
+    if (line.startsWith("rev-list -n"))
+      return ok(options.hashes?.join("\n") ?? "");
     if (line.startsWith("check-ref-format")) return ok("");
     if (line.startsWith("config --bool")) return bad(1, "");
     if (line.startsWith("remote get-url")) return ok(`${pushUrl}\n`);
     if (line === "ls-files --stage -z") return ok(options.index ?? "index0\n");
-    if (line === "write-tree") return ok(`${env?.GIT_INDEX_FILE ? "tree1" : "index1"}\n`);
+    if (line === "write-tree")
+      return ok(`${env?.GIT_INDEX_FILE ? "tree1" : "index1"}\n`);
     if (line.startsWith("read-tree")) return ok("");
     if (line.startsWith("add -A")) return ok("");
     if (line.startsWith("diff --cached --name-only")) return ok("");
     if (line.startsWith("diff --cached") && line.includes("--patch")) {
-      if (options.previewThrows) throw new Error("review exploded with a private path");
+      if (options.previewThrows)
+        throw new Error("review exploded with a private path");
       if (options.previewGate) await options.previewGate();
       return ok(patch);
     }
-    if (line.startsWith("diff --cached") && line.includes("--stat")) return ok(stat);
+    if (line.startsWith("diff --cached") && line.includes("--stat"))
+      return ok(stat);
     if (line.startsWith("diff --quiet")) return ok("");
     if (line.includes("commit -m")) {
       if (options.commitGate) await options.commitGate();
@@ -469,7 +568,10 @@ function fakeGit(options = {}) {
     if (line.includes("^{tree}")) {
       // A hook can rewrite what the commit actually contains; the service compares
       // the committed tree with the reviewed one.
-      const tree = committedOnce && options.treeAfterCommit ? options.treeAfterCommit : options.tree ?? "tree1";
+      const tree =
+        committedOnce && options.treeAfterCommit
+          ? options.treeAfterCommit
+          : (options.tree ?? "tree1");
       return ok(`${tree}\n`);
     }
     if (line.startsWith("reset -q")) return ok("");
@@ -539,7 +641,10 @@ function scriptsFixture() {
 
 test("places one sidebar block after every sidebar.content contribution", async () => {
   const { context, calls } = createContext({ locationDirectory: tmpdir() });
-  const cleanup = await startPlugin(context, view, { spawn: createFakeSpawn(), notifyMs: 0 });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+  });
   assert.equal(calls.slots.length, 1);
   assert.equal(calls.slots[0].after, "sidebar.content");
   assert.equal("append" in calls.slots[0], false);
@@ -559,7 +664,10 @@ test("registers palette commands for every discovered action plus the controls",
     sessions: { s1: { directory: dir } },
     route: () => ({ type: "session", sessionID: "s1" }),
   });
-  const cleanup = await startPlugin(context, view, { spawn: createFakeSpawn(), notifyMs: 0 });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+  });
   assert.equal(calls.layers.length, 1);
   const layer = calls.layers[0];
   assert.equal(layer.mode, "global");
@@ -588,7 +696,7 @@ test("registers palette commands for every discovered action plus the controls",
     layer.commands.every((command) => command.title.startsWith("Launchpad: ")),
     "every palette title uses the visible section name",
   );
-  assert.equal(PLUGIN_ID, "local.control");
+  assert.equal(PLUGIN_ID, "local.launchpad");
   await cleanup();
 });
 
@@ -602,7 +710,9 @@ test("stop-all reports a refused signal and warns when nothing runs", async () =
   const spawn = createFakeSpawn();
   spawn.killProcessGroup = (pid, signal) => {
     if (signal === "SIGTERM") {
-      throw Object.assign(new Error("operation not permitted"), { code: "EPERM" });
+      throw Object.assign(new Error("operation not permitted"), {
+        code: "EPERM",
+      });
     }
     const entry = spawn.calls.find((call) => call.child.pid === pid);
     if (!entry) throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
@@ -616,7 +726,9 @@ test("stop-all reports a refused signal and warns when nothing runs", async () =
     readProcessStat: () => undefined,
   });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
-  const stopAll = calls.layers[0].commands.find((command) => command.id === `${PLUGIN_ID}.stop-all`);
+  const stopAll = calls.layers[0].commands.find(
+    (command) => command.id === `${PLUGIN_ID}.stop-all`,
+  );
   assert.ok(stopAll, "stop-all command is registered");
 
   stopAll.run();
@@ -672,7 +784,9 @@ test("click resolution follows the session that is active at click time", async 
 
   runtime.startAction("build-mobile");
   assert.equal(spawn.calls.length, 2, "duplicate start is refused");
-  assert.ok(calls.toasts.some((toast) => /already running/.test(toast.message)));
+  assert.ok(
+    calls.toasts.some((toast) => /already running/.test(toast.message)),
+  );
 
   await cleanup();
 });
@@ -740,7 +854,9 @@ test("log dialog reads snapshots and drives stop, reload, and restart", async ()
 
   const sizeEntry = calls.dialogs.find((entry) => entry.set);
   assert.equal(sizeEntry.set.size, "large");
-  const dialog = calls.dialogs.find((entry) => typeof entry.render === "function");
+  const dialog = calls.dialogs.find(
+    (entry) => typeof entry.render === "function",
+  );
   const element = dialog.render();
   assert.equal(element.kind, "log");
   assert.equal(element.props.runKey, key);
@@ -769,7 +885,10 @@ test("rows list only supported actions, in grid order", async () => {
     sessions: { s1: { directory: root } },
     route: () => ({ type: "session", sessionID: "s1" }),
   });
-  const cleanup = await startPlugin(context, view, { spawn: createFakeSpawn(), notifyMs: 0 });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+  });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
   const rows = runtime.rows("s1");
@@ -792,14 +911,19 @@ test("rows list only supported actions, in grid order", async () => {
 test("hides unsupported actions instead of listing them", async () => {
   const partial = fixture({
     ".git/HEAD": "ref: refs/heads/main\n",
-    "package.json": { scripts: { "build:mobile": "echo build", live: "echo live" } },
+    "package.json": {
+      scripts: { "build:mobile": "echo build", live: "echo live" },
+    },
   });
   const { context, calls } = createContext({
     locationDirectory: partial,
     sessions: { s1: { directory: partial } },
     route: () => ({ type: "session", sessionID: "s1" }),
   });
-  const cleanup = await startPlugin(context, view, { spawn: createFakeSpawn(), notifyMs: 0 });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+  });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
   const partialRows = runtime.rows("s1");
@@ -815,7 +939,10 @@ test("hides unsupported actions instead of listing them", async () => {
   const blocked = runtime.startAction("adb-install");
   assert.equal(blocked.ok, false);
   assert.equal(blocked.code, "unsupported");
-  assert.match(calls.toasts.at(-1).message, /ADB install: no release or debug APK/);
+  assert.match(
+    calls.toasts.at(-1).message,
+    /ADB install: no release or debug APK/,
+  );
 
   const empty = fixture({ "notes.txt": "nothing\n" });
   const second = createContext({
@@ -827,8 +954,13 @@ test("hides unsupported actions instead of listing them", async () => {
     spawn: createFakeSpawn(),
     notifyMs: 0,
   });
-  const secondRuntime = second.calls.slots[0].render({ sessionID: "s2" }).props.runtime;
-  assert.deepEqual(secondRuntime.rows("s2").items, [], "no supported action hides the section");
+  const secondRuntime = second.calls.slots[0].render({ sessionID: "s2" }).props
+    .runtime;
+  assert.deepEqual(
+    secondRuntime.rows("s2").items,
+    [],
+    "no supported action hides the section",
+  );
   assert.equal(secondRuntime.rows("s2").projectName, path.basename(empty));
 
   await cleanup();
@@ -873,7 +1005,11 @@ test("the adb row appears only with a built APK and installs one-shot", async ()
   assert.equal(spawn.calls[0].options.env.BUILD_DEFINES_FILE, undefined);
   const snapshot = runtime.snapshot(started.key);
   assert.equal(snapshot.stdin, false, "an install is one-shot");
-  assert.equal(runtime.send(started.key, "r"), false, "reload stays disabled for a one-shot run");
+  assert.equal(
+    runtime.send(started.key, "r"),
+    false,
+    "reload stays disabled for a one-shot run",
+  );
   assert.ok(
     calls.dialogs.some((entry) => typeof entry.render === "function"),
     "the log dialog opens for the install",
@@ -929,15 +1065,25 @@ test("a nested package borrows root commands and runs them from the owning folde
   );
   assert.equal(extra[0].id.startsWith("script:"), true);
   const nextLive = rows.items.find((item) => item.action.id === "next-live");
-  assert.equal(nextLive.resolution.cwd, web, "the nearest package owns next-live");
+  assert.equal(
+    nextLive.resolution.cwd,
+    web,
+    "the nearest package owns next-live",
+  );
 
   runtime.startAction("next-live");
   assert.equal(spawn.calls[0].options.cwd, web);
   assert.deepEqual(spawn.calls[0].args, ["run", "dev"]);
 
   const afterStart = runtime.rows("s1");
-  const build = afterStart.items.find((item) => item.action.id === "build-mobile");
-  assert.equal(build.resolution.cwd, root, "root scripts run from the workspace root");
+  const build = afterStart.items.find(
+    (item) => item.action.id === "build-mobile",
+  );
+  assert.equal(
+    build.resolution.cwd,
+    root,
+    "root scripts run from the workspace root",
+  );
   assert.equal(
     build.resolution.env.BUILD_DEFINES_FILE,
     path.join(root, "local-public-defines.json"),
@@ -967,14 +1113,26 @@ test("the log command shows the active project's run, never another project's", 
   assert.equal(runtime.logKey(), firstKey);
 
   session = "s2";
-  assert.equal(runtime.logKey(), undefined, "another project's history is never offered");
+  assert.equal(
+    runtime.logKey(),
+    undefined,
+    "another project's history is never offered",
+  );
 
   runtime.startAction("build-mobile");
   const secondKey = runtime.manager.keyFor("build-mobile", second);
-  assert.equal(runtime.logKey(), secondKey, "the active project wins over the older run");
+  assert.equal(
+    runtime.logKey(),
+    secondKey,
+    "the active project wins over the older run",
+  );
 
   runtime.stop(secondKey);
-  assert.equal(runtime.logKey(), secondKey, "a finished run of this project is still openable");
+  assert.equal(
+    runtime.logKey(),
+    secondKey,
+    "a finished run of this project is still openable",
+  );
 
   await cleanup();
 });
@@ -1036,7 +1194,10 @@ test("show logs reopens this project's output without spawning", async () => {
   assert.equal(runtime.rows("s1").canLog, false);
   assert.equal(runtime.showLog(), false);
   assert.equal(calls.toasts.at(-1).variant, "warning");
-  assert.match(calls.toasts.at(-1).message, /No runner output for this project/);
+  assert.match(
+    calls.toasts.at(-1).message,
+    /No runner output for this project/,
+  );
 
   const started = runtime.startAction("build-mobile");
   const spawned = spawn.calls.length;
@@ -1044,9 +1205,15 @@ test("show logs reopens this project's output without spawning", async () => {
 
   assert.equal(runtime.rows("s1").canLog, true);
   assert.equal(runtime.showLog(), true);
-  const dialog = calls.dialogs.find((entry) => typeof entry.render === "function");
+  const dialog = calls.dialogs.find(
+    (entry) => typeof entry.render === "function",
+  );
   assert.equal(dialog.render().props.runKey, started.key);
-  assert.equal(spawn.calls.length, spawned, "showing logs never starts a command");
+  assert.equal(
+    spawn.calls.length,
+    spawned,
+    "showing logs never starts a command",
+  );
 
   await cleanup();
 });
@@ -1155,9 +1322,13 @@ test("a stale log close callback cannot clear its replacement dialog", async () 
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
   const { key } = runtime.startAction("mobile-live");
-  const first = calls.dialogs.find((entry) => typeof entry.render === "function");
+  const first = calls.dialogs.find(
+    (entry) => typeof entry.render === "function",
+  );
   assert.equal(runtime.openLog(key), true);
-  const last = calls.dialogs.filter((entry) => typeof entry.render === "function").at(-1);
+  const last = calls.dialogs
+    .filter((entry) => typeof entry.render === "function")
+    .at(-1);
 
   first.onClose();
   await cleanup();
@@ -1177,9 +1348,16 @@ test("cleanup leaves a mounted Git flow after a cosmetic size failure", async ()
     // The status read never settles: this test only cares that the Git dialog
     // mounted, not how its asynchronous preload finishes.
     status: () => new Promise(() => {}),
-    preview: async () => ({ ok: false, error: { code: "no-selection", message: "No files were selected" } }),
+    preview: async () => ({
+      ok: false,
+      error: { code: "no-selection", message: "No files were selected" },
+    }),
   };
-  const cleanup = await startPlugin(context, view, { spawn: createFakeSpawn(), notifyMs: 0, git });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    git,
+  });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
   const dialog = context.ui.dialog;
   const set = dialog.set;
@@ -1217,7 +1395,10 @@ test("replace/setSize keeps log ownership through stale and current closes", asy
   dialog.show = () => {
     throw new Error("the replace path must win");
   };
-  const cleanup = await startPlugin(context, view, { spawn: createFakeSpawn(), notifyMs: 0 });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+  });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
   const { key } = runtime.startAction("mobile-live");
 
@@ -1227,13 +1408,21 @@ test("replace/setSize keeps log ownership through stale and current closes", asy
   const [first, second] = replaced;
 
   first.onClose();
-  assert.equal(runtime.disposeLogs(), true, "a stale close leaves the newer dialog owned");
+  assert.equal(
+    runtime.disposeLogs(),
+    true,
+    "a stale close leaves the newer dialog owned",
+  );
   assert.equal(calls.dialogs.filter((entry) => entry.clear).length, 1);
 
   assert.equal(runtime.openLog(key), true);
   const third = replaced.at(-1);
   third.onClose();
-  assert.equal(runtime.disposeLogs(), false, "the current close releases ownership");
+  assert.equal(
+    runtime.disposeLogs(),
+    false,
+    "the current close releases ownership",
+  );
   assert.notEqual(second, third);
   await cleanup();
   assert.equal(calls.dialogs.filter((entry) => entry.clear).length, 1);
@@ -1250,7 +1439,9 @@ test("the process exit listener disposes the manager synchronously", async () =>
   const spawn = createFakeSpawn();
   const cleanup = await startPlugin(context, view, { spawn, notifyMs: 0 });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
-  const onExit = process.listeners("exit").find((listener) => !before.has(listener));
+  const onExit = process
+    .listeners("exit")
+    .find((listener) => !before.has(listener));
   assert.equal(typeof onExit, "function");
 
   runtime.startAction("mobile-live");
@@ -1278,7 +1469,9 @@ test("the process exit listener SIGKILLs a stubborn owned group before returning
     probeGroup: () => true,
   });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
-  const onExit = process.listeners("exit").find((listener) => !before.has(listener));
+  const onExit = process
+    .listeners("exit")
+    .find((listener) => !before.has(listener));
   assert.equal(typeof onExit, "function");
 
   runtime.startAction("mobile-live");
@@ -1315,7 +1508,9 @@ test("the process exit listener SIGKILLs an already-stopping owned group", async
     probeGroup: () => true,
   });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
-  const onExit = process.listeners("exit").find((listener) => !before.has(listener));
+  const onExit = process
+    .listeners("exit")
+    .find((listener) => !before.has(listener));
   assert.equal(typeof onExit, "function");
 
   const { key } = runtime.startAction("mobile-live");
@@ -1347,7 +1542,9 @@ test("a log close from the view releases ownership before cleanup", async () => 
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
   runtime.startAction("mobile-live");
-  const dialog = calls.dialogs.find((entry) => typeof entry.render === "function");
+  const dialog = calls.dialogs.find(
+    (entry) => typeof entry.render === "function",
+  );
   const props = dialog.render().props;
   assert.equal(typeof props.onClose, "function");
   props.onClose();
@@ -1405,7 +1602,10 @@ test("sidebar buttons are frames with no fill and a readable label", () => {
 
   // The section appears while there is something to show: commands, or a
   // runner this project can still stop or read.
-  assert.match(sidebar, /items\(\)\.length > 0 \|\|\s*board\(\)\.canStop \|\|\s*board\(\)\.canLog \|\|\s*board\(\)\.canCommit \|\|\s*board\(\)\.canPush/);
+  assert.match(
+    sidebar,
+    /items\(\)\.length > 0 \|\|\s*board\(\)\.canStop \|\|\s*board\(\)\.canLog \|\|\s*board\(\)\.canCommit \|\|\s*board\(\)\.canPush/,
+  );
   // Row-major pairs, two columns, one node per slot.
   assert.match(sidebar, /index \+= 2/);
   assert.match(sidebar, /pairs\.push\(\[list\[index\], list\[index \+ 1\]\]\)/);
@@ -1414,7 +1614,10 @@ test("sidebar buttons are frames with no fill and a readable label", () => {
   // Every button centres its own label, so a row needs no centring flag, and a
   // lone button fills the row without an empty slot.
   assert.doesNotMatch(sidebar, /centered=/);
-  assert.doesNotMatch(sidebar, /fallback=\{<box flexGrow=\{1\} flexBasis=\{0\} \/>\}/);
+  assert.doesNotMatch(
+    sidebar,
+    /fallback=\{<box flexGrow=\{1\} flexBasis=\{0\} \/>\}/,
+  );
   // Nothing paints a background: the sidebar background is the button background.
   assert.doesNotMatch(source, /backgroundColor=/);
 
@@ -1434,7 +1637,10 @@ test("sidebar buttons are frames with no fill and a readable label", () => {
   // the label for every cell, so a lone button, a paired button and a control
   // all read the same, and a long label wraps instead of clipping.
   const label = functionBody(source, "function CellLabel");
-  assert.match(button, /<CellLabel[^>]*label=\{row\(\)\?\.action\.label \?\? ""\}/);
+  assert.match(
+    button,
+    /<CellLabel[^>]*label=\{row\(\)\?\.action\.label \?\? ""\}/,
+  );
   assert.match(label, /flexWrap="wrap"/);
   assert.match(label, /justifyContent="center"/);
   assert.match(label, /wrapMode="char"/);
@@ -1450,8 +1656,14 @@ test("sidebar buttons are frames with no fill and a readable label", () => {
     source,
     /import \{\s*buttonVisual,\s*controlVisual,\s*dialogKeyLayer,\s*statusLine,\s*statusTone,\s*token,\s*\} from "\.\/runners\.js";/,
   );
-  assert.match(button, /buttonVisual\(theme, row\(\), props\.hovered\(\) === row\(\)\?\.action\.id\)/);
-  assert.match(dialogButton, /controlVisual\(theme, \{ disabled: props\.disabled, hovered: hover\(\) \}\)/);
+  assert.match(
+    button,
+    /buttonVisual\(theme, row\(\), props\.hovered\(\) === row\(\)\?\.action\.id\)/,
+  );
+  assert.match(
+    dialogButton,
+    /controlVisual\(theme, \{ disabled: props\.disabled, hovered: hover\(\) \}\)/,
+  );
   // No direct foreground choice in the dialog control: the helper owns it.
   assert.doesNotMatch(dialogButton, /token\(theme,/);
   assert.doesNotMatch(source, /rowVisual|TOKENS|readToken|textAccent/);
@@ -1465,17 +1677,27 @@ test("sidebar buttons are frames with no fill and a readable label", () => {
   // as an action row and the section adds no vertical padding, so the gap
   // between rows is identical everywhere.
   assert.equal(
-    sidebar.split('<box flexDirection="row" flexShrink={0} gap={1}>').length - 1,
+    sidebar.split('<box flexDirection="row" flexShrink={0} gap={1}>').length -
+      1,
     3,
     "the two control rows and the grid rows share one row box",
   );
-  assert.doesNotMatch(sidebar, /paddingTop|paddingBottom|marginTop|marginBottom/);
+  assert.doesNotMatch(
+    sidebar,
+    /paddingTop|paddingBottom|marginTop|marginBottom/,
+  );
   assert.match(sidebar, /<box flexDirection="column" flexShrink=\{0\}>/);
   // The Git controls are the first row inside the section: above the command
   // grid and above the plugin-level controls, still under the header. They stay
   // disabled while no service is available.
-  assert.match(sidebar, /label="Commit"[\s\S]*?disabled=\{!board\(\)\.canCommit\}[\s\S]*?onPress=\{\(\) => runtime\.openGit\("commit"\)\}/);
-  assert.match(sidebar, /label="Push"[\s\S]*?disabled=\{!board\(\)\.canPush\}[\s\S]*?onPress=\{\(\) => runtime\.openGit\("push"\)\}/);
+  assert.match(
+    sidebar,
+    /label="Commit"[\s\S]*?disabled=\{!board\(\)\.canCommit\}[\s\S]*?onPress=\{\(\) => runtime\.openGit\("commit"\)\}/,
+  );
+  assert.match(
+    sidebar,
+    /label="Push"[\s\S]*?disabled=\{!board\(\)\.canPush\}[\s\S]*?onPress=\{\(\) => runtime\.openGit\("push"\)\}/,
+  );
   const gitAt = sidebar.indexOf('label="Commit"');
   const gridAt = sidebar.indexOf("<Index each={rows()}>");
   const stopAt = sidebar.indexOf('label="Stop all"');
@@ -1492,7 +1714,10 @@ test("sidebar buttons are frames with no fill and a readable label", () => {
   assert.match(sidebar, /onPress=\{\(\) => runtime\.showLog\(\)\}/);
   const utility = functionBody(source, "function UtilityButton");
   assert.match(utility, /<CellLabel[^>]*label=\{props\.label\}/);
-  assert.match(utility, /controlVisual\(theme, \{ disabled: props\.disabled, hovered: hover\(\) \}\)/);
+  assert.match(
+    utility,
+    /controlVisual\(theme, \{ disabled: props\.disabled, hovered: hover\(\) \}\)/,
+  );
   assert.doesNotMatch(utility, /buttonVisual/);
 });
 
@@ -1524,11 +1749,18 @@ test("the git dialog drives both flows through the runtime, never through git", 
   // control left is Close.
   assert.match(dialog, /step\("committed"\)/);
   assert.match(dialog, /state\(\)\?\.error\?\.hash/);
-  assert.match(dialog, /commit \$\{state\(\)\.error\.hash\} already exists — do not retry/);
-  const committedBlocks = [...dialog.matchAll(/<Show when=\{step\("committed"\)\}>[\s\S]*?<\/Show>/g)].map(
-    (match) => match[0],
+  assert.match(
+    dialog,
+    /commit \$\{state\(\)\.error\.hash\} already exists — do not retry/,
   );
-  assert.equal(committedBlocks.length, 2, "a body and a control block for the committed step");
+  const committedBlocks = [
+    ...dialog.matchAll(/<Show when=\{step\("committed"\)\}>[\s\S]*?<\/Show>/g),
+  ].map((match) => match[0]);
+  assert.equal(
+    committedBlocks.length,
+    2,
+    "a body and a control block for the committed step",
+  );
   assert.match(committedBlocks[1], /label="Close esc"/);
   assert.doesNotMatch(
     committedBlocks[1],
@@ -1576,7 +1808,10 @@ test("the git dialog drives both flows through the runtime, never through git", 
   // The dialog never runs git, never sends anything itself, and never sizes or
   // clears the popup: the runtime owns both.
   assert.doesNotMatch(dialog, /from "\.\/git\.js"/);
-  assert.doesNotMatch(dialog, /execFile|child_process|spawn|fetch\(|copilotBin|buildCopilotArgs/);
+  assert.doesNotMatch(
+    dialog,
+    /execFile|child_process|spawn|fetch\(|copilotBin|buildCopilotArgs/,
+  );
   assert.doesNotMatch(dialog, /dialog\.(show|set|clear|prompt)/);
 });
 
@@ -1596,8 +1831,15 @@ test("the commit message editor is a real multi-line field with an explicit save
   assert.match(editor, /flexGrow=\{1\}/);
   assert.match(editor, /minHeight=\{4\}/);
   assert.doesNotMatch(editor, /height=\{6\}/);
-  assert.match(editor, /onContentChange=\{\(value\) => \{ report\(value\); refreshPosition\(\); \}\}/);
-  assert.match(editor, /field\?\.plainText/, "a content event is read back as text");
+  assert.match(
+    editor,
+    /onContentChange=\{\(value\) => \{ report\(value\); refreshPosition\(\); \}\}/,
+  );
+  assert.match(
+    editor,
+    /field\?\.plainText/,
+    "a content event is read back as text",
+  );
   assert.match(editor, /onSubmit=\{\(\) => props\.onSave\?\.\(\)\}/);
 
   // Enter keeps typing a new line. Alt+Enter saves on the host binding, and
@@ -1619,12 +1861,21 @@ test("the section header collapses the rows without touching a run", () => {
   const sidebar = functionBody(source, "export function Sidebar");
 
   // Expanded by default, and the toggle is view state only.
-  assert.match(sidebar, /const \[collapsed, setCollapsed\] = createSignal\(false\)/);
-  assert.match(sidebar, /onMouseUp=\{\(\) => setCollapsed\(\(value\) => !value\)\}/);
+  assert.match(
+    sidebar,
+    /const \[collapsed, setCollapsed\] = createSignal\(false\)/,
+  );
+  assert.match(
+    sidebar,
+    /onMouseUp=\{\(\) => setCollapsed\(\(value\) => !value\)\}/,
+  );
   assert.match(sidebar, /<Show when=\{!collapsed\(\)\}>/);
   // The collapse arrow is a full triangle in explicit white, while the title
   // keeps the sidebar foreground.
-  assert.match(sidebar, /<text fg="#ffffff" wrapMode="none">\s*\{collapsed\(\) \? "▶" : "▼"\}\s*<\/text>/);
+  assert.match(
+    sidebar,
+    /<text fg="#ffffff" wrapMode="none">\s*\{collapsed\(\) \? "▶" : "▼"\}\s*<\/text>/,
+  );
   assert.match(sidebar, /<b>Launchpad<\/b>/);
 
   // The header, and only the header, stays outside the collapsed branch.
@@ -1687,7 +1938,10 @@ test("the log dialog scrolls the retained output with fixed controls", () => {
 
   // Stop tells the truth: it is disabled while a stop is already in flight and
   // reports a refusal instead of swallowing it.
-  assert.match(dialog, /disabled=\{!value\(\)\.running \|\| value\(\)\.stopping\}/);
+  assert.match(
+    dialog,
+    /disabled=\{!value\(\)\.running \|\| value\(\)\.stopping\}/,
+  );
   assert.match(dialog, /onPress=\{\(\) => runtime\.requestStop\(runKey\)\}/);
   assert.doesNotMatch(dialog, /runtime\.stop\(runKey\)/);
 });
@@ -1704,7 +1958,12 @@ test("escape hides the log dialog and leaves the runner running", async () => {
   const layersBefore = calls.layers.length;
 
   // The real LogDialog registers this layer while it is mounted.
-  const dispose = dialogKeyLayer(context, () => context.ui.dialog.clear(), runtime, started.key);
+  const dispose = dialogKeyLayer(
+    context,
+    () => context.ui.dialog.clear(),
+    runtime,
+    started.key,
+  );
   assert.equal(calls.layers.length, layersBefore + 1);
   const layer = calls.layers.at(-1);
   assert.equal(layer.mode, "modal");
@@ -1715,12 +1974,24 @@ test("escape hides the log dialog and leaves the runner running", async () => {
 
   assert.equal(escape.run(), true);
   assert.equal(calls.dialogs.at(-1).clear, true, "the popup is cleared");
-  assert.equal(runtime.snapshot(started.key).running, true, "the runner keeps running");
-  assert.deepEqual(spawn.calls[0].child.signals, [], "escape never signals the child");
+  assert.equal(
+    runtime.snapshot(started.key).running,
+    true,
+    "the runner keeps running",
+  );
+  assert.deepEqual(
+    spawn.calls[0].child.signals,
+    [],
+    "escape never signals the child",
+  );
 
   // Once the dialog is gone the host owns the key again.
   dispose();
-  assert.equal(escape.run(), false, "a disposed layer lets the host handle escape");
+  assert.equal(
+    escape.run(),
+    false,
+    "a disposed layer lets the host handle escape",
+  );
   assert.equal(runtime.snapshot(started.key).running, true);
 
   await cleanup();
@@ -1732,7 +2003,10 @@ test("the log dialog claims its keys only while it is mounted", () => {
 
   // The layer is registered by the dialog itself, so the keys are never global
   // and reach the run the dialog was opened for.
-  assert.match(dialog, /onCleanup\(dialogKeyLayer\(context, close, runtime, runKey\)\)/);
+  assert.match(
+    dialog,
+    /onCleanup\(dialogKeyLayer\(context, close, runtime, runKey\)\)/,
+  );
   // The hint follows the existing "Reload r" / "Restart R" wording.
   assert.match(dialog, /label="Close esc"/);
   // Hiding is not stopping.
@@ -1749,7 +2023,8 @@ test("the log dialog reads the whole history while a sidebar row stays cheap", a
   const started = runtime.startAction("build-mobile");
   assert.equal(started.ok, true);
   const { child } = spawn.calls[0];
-  for (let index = 0; index < 50; index += 1) child.stdout.emit("data", `line ${index}\n`);
+  for (let index = 0; index < 50; index += 1)
+    child.stdout.emit("data", `line ${index}\n`);
 
   const log = runtime.snapshot(started.key);
   assert.equal(log.lineCount, 50);
@@ -1780,7 +2055,11 @@ async function liveLog(options = {}) {
     route: () => ({ type: "session", sessionID: "s1" }),
   });
   const spawn = createFakeSpawn();
-  const cleanup = await startPlugin(context, view, { spawn, notifyMs: 0, ...options });
+  const cleanup = await startPlugin(context, view, {
+    spawn,
+    notifyMs: 0,
+    ...options,
+  });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
   const started = runtime.startAction("mobile-live");
   assert.equal(started.ok, true);
@@ -1792,7 +2071,12 @@ test("the dialog's advertised r and R keys drive reload and restart", async () =
   const child = spawn.calls[0].child;
 
   // The real LogDialog registers this layer while it is mounted.
-  const dispose = dialogKeyLayer(context, () => context.ui.dialog.clear(), runtime, key);
+  const dispose = dialogKeyLayer(
+    context,
+    () => context.ui.dialog.clear(),
+    runtime,
+    key,
+  );
   const layer = calls.layers.at(-1);
   assert.equal(layer.mode, "modal");
   const reload = layer.commands.find((command) => command.bind === "r");
@@ -1812,13 +2096,21 @@ test("the dialog's advertised r and R keys drive reload and restart", async () =
   assert.equal(reload.run(), true);
   assert.equal(restart.run(), true);
   assert.deepEqual(child.writes, ["r", "R"], "each key writes its own byte");
-  assert.equal(runtime.snapshot(key).running, true, "a reload never stops the run");
+  assert.equal(
+    runtime.snapshot(key).running,
+    true,
+    "a reload never stops the run",
+  );
   assert.deepEqual(child.signals, [], "a reload never signals the child");
 
   // Once the dialog is gone the host owns r/R again.
   dispose();
   assert.equal(reload.run(), false, "a disposed layer releases the key");
-  assert.deepEqual(child.writes, ["r", "R"], "no write after the dialog closed");
+  assert.deepEqual(
+    child.writes,
+    ["r", "R"],
+    "no write after the dialog closed",
+  );
   await cleanup();
 });
 
@@ -1837,10 +2129,21 @@ test("a hotkey on a run that takes no input warns instead of faking a reload", a
   assert.equal(started.ok, true);
   const child = spawn.calls[0].child;
 
-  const dispose = dialogKeyLayer(context, () => context.ui.dialog.clear(), runtime, started.key);
-  const reload = calls.layers.at(-1).commands.find((command) => command.bind === "r");
+  const dispose = dialogKeyLayer(
+    context,
+    () => context.ui.dialog.clear(),
+    runtime,
+    started.key,
+  );
+  const reload = calls.layers
+    .at(-1)
+    .commands.find((command) => command.bind === "r");
   assert.equal(reload.run(), true, "the dialog still consumes the key");
-  assert.deepEqual(child.writes, [], "a one-shot build never receives a keystroke");
+  assert.deepEqual(
+    child.writes,
+    [],
+    "a one-shot build never receives a keystroke",
+  );
   assert.equal(calls.toasts.at(-1).variant, "warning");
   assert.match(calls.toasts.at(-1).message, /does not take reload input/);
   dispose();
@@ -1871,8 +2174,15 @@ test("the dialog's s key stops through the stop path, never as input", async () 
   const { context, runtime, calls, spawn, cleanup, key } = await liveLog();
   const child = spawn.calls[0].child;
 
-  const dispose = dialogKeyLayer(context, () => context.ui.dialog.clear(), runtime, key);
-  const stop = calls.layers.at(-1).commands.find((command) => command.bind === "s");
+  const dispose = dialogKeyLayer(
+    context,
+    () => context.ui.dialog.clear(),
+    runtime,
+    key,
+  );
+  const stop = calls.layers
+    .at(-1)
+    .commands.find((command) => command.bind === "s");
   assert.ok(stop, "s is bound");
   assert.equal(stop.group, "Dialog");
   assert.equal(stop.title, "Stop runner");
@@ -1880,7 +2190,11 @@ test("the dialog's s key stops through the stop path, never as input", async () 
   assert.equal(stop.run(), true);
   assert.deepEqual(child.writes, [], "s is never written to the child's input");
   assert.equal(runtime.snapshot(key).status, "stopped", "the stop path ran");
-  assert.deepEqual(child.signals, ["SIGTERM"], "the group is signalled, not typed at");
+  assert.deepEqual(
+    child.signals,
+    ["SIGTERM"],
+    "the group is signalled, not typed at",
+  );
 
   dispose();
   await cleanup();
@@ -1900,22 +2214,42 @@ test("each dialog layer drives the run it was mounted for", async () => {
   const live = runtime.startAction("mobile-live");
   assert.equal(live.ok, true);
   const liveChild = spawn.calls[0].child;
-  const firstLayer = dialogKeyLayer(context, () => context.ui.dialog.clear(), runtime, live.key);
+  const firstLayer = dialogKeyLayer(
+    context,
+    () => context.ui.dialog.clear(),
+    runtime,
+    live.key,
+  );
 
   // The host swaps the dialog onto another run and mounts a second layer.
   const build = runtime.startAction("build-mobile");
   assert.equal(build.ok, true);
   const buildChild = spawn.calls[1].child;
-  const secondLayer = dialogKeyLayer(context, () => context.ui.dialog.clear(), runtime, build.key);
+  const secondLayer = dialogKeyLayer(
+    context,
+    () => context.ui.dialog.clear(),
+    runtime,
+    build.key,
+  );
 
   // The old layer unmounts after the new one registered: the live dialog keeps
   // its keys, and the run behind the closed dialog is left alone.
   firstLayer();
-  const reload = calls.layers.at(-1).commands.find((command) => command.bind === "r");
+  const reload = calls.layers
+    .at(-1)
+    .commands.find((command) => command.bind === "r");
   assert.equal(reload.run(), true, "the new dialog keeps its hotkeys");
-  assert.deepEqual(buildChild.writes, [], "the one-shot build is the run that is driven");
+  assert.deepEqual(
+    buildChild.writes,
+    [],
+    "the one-shot build is the run that is driven",
+  );
   assert.match(calls.toasts.at(-1).message, /does not take reload input/);
-  assert.deepEqual(liveChild.writes, [], "the closed dialog no longer drives its old run");
+  assert.deepEqual(
+    liveChild.writes,
+    [],
+    "the closed dialog no longer drives its old run",
+  );
 
   secondLayer();
   await cleanup();
@@ -1929,7 +2263,11 @@ test("the git controls are enabled by the built-in service and explain an inject
     route: () => ({ type: "session", sessionID: "s1" }),
   });
   // An explicit null is how a host (or a test) says "no service here".
-  const cleanup = await startPlugin(context, view, { spawn: createFakeSpawn(), notifyMs: 0, git: null });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    git: null,
+  });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
   assert.equal(runtime.gitReady(), false);
@@ -1942,13 +2280,21 @@ test("the git controls are enabled by the built-in service and explain an inject
     message: "the git service is not connected yet",
   });
   assert.equal(calls.toasts.at(-1).variant, "warning");
-  assert.equal(calls.toasts.at(-1).message, "Commit: the git service is not connected yet");
+  assert.equal(
+    calls.toasts.at(-1).message,
+    "Commit: the git service is not connected yet",
+  );
 
   // The palette reaches the same path as the button.
-  const push = calls.layers[0].commands.find((command) => command.id === `${PLUGIN_ID}.push`);
+  const push = calls.layers[0].commands.find(
+    (command) => command.id === `${PLUGIN_ID}.push`,
+  );
   assert.ok(push, "the push command is registered");
   push.run();
-  assert.equal(calls.toasts.at(-1).message, "Push: the git service is not connected yet");
+  assert.equal(
+    calls.toasts.at(-1).message,
+    "Push: the git service is not connected yet",
+  );
 
   await cleanup();
 });
@@ -1961,15 +2307,28 @@ test("a service without the commit steps says which part is missing", async () =
     route: () => ({ type: "session", sessionID: "s1" }),
   });
   const git = { reason: "git is not installed on this machine" };
-  const cleanup = await startPlugin(context, view, { spawn: createFakeSpawn(), notifyMs: 0, git });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+    git,
+  });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
   // A service that reports a reason is still counted as connected: the reason
   // explains a later refusal, it does not hide the controls.
   assert.equal(runtime.rows("s1").canCommit, true);
-  assert.equal(runtime.openGit("push").message, "the git service is missing the push steps");
-  assert.equal(calls.toasts.at(-1).message, "Push: the git service is missing the push steps");
-  assert.equal(runtime.openGit("commit").message, "the git service is missing the commit steps");
+  assert.equal(
+    runtime.openGit("push").message,
+    "the git service is missing the push steps",
+  );
+  assert.equal(
+    calls.toasts.at(-1).message,
+    "Push: the git service is missing the push steps",
+  );
+  assert.equal(
+    runtime.openGit("commit").message,
+    "the git service is missing the commit steps",
+  );
 
   await cleanup();
 });
@@ -1990,14 +2349,29 @@ test("a connected service gets the click-time session and folder", async () => {
   const git = {
     status: async (input) => {
       opened.push({ flow: "commit", ...input });
-      return { ok: false, error: { code: "not-a-repo", message: "Not a git repository" } };
+      return {
+        ok: false,
+        error: { code: "not-a-repo", message: "Not a git repository" },
+      };
     },
-    preview: async () => ({ ok: false, error: { code: "no-selection", message: "No files were selected" } }),
+    preview: async () => ({
+      ok: false,
+      error: { code: "no-selection", message: "No files were selected" },
+    }),
     previewPush: async (input) => {
       opened.push({ flow: "push", ...input });
-      return { ok: false, error: { code: "no-upstream", message: "No push destination is configured" } };
+      return {
+        ok: false,
+        error: {
+          code: "no-upstream",
+          message: "No push destination is configured",
+        },
+      };
     },
-    push: async () => ({ ok: false, error: { code: "unconfirmed", message: "Pushing was not confirmed" } }),
+    push: async () => ({
+      ok: false,
+      error: { code: "unconfirmed", message: "Pushing was not confirmed" },
+    }),
   };
   const cleanup = await startPlugin(context, view, {
     spawn: createFakeSpawn(),
@@ -2027,7 +2401,8 @@ test("a connected service gets the click-time session and folder", async () => {
 test("the commit flow reviews the exact patch before anything is written", async () => {
   const dir = scriptsFixture();
   const tmpRoot = path.join(dir, "git-tmp");
-  const status = "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0? notes.txt\0";
+  const status =
+    "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0? notes.txt\0";
   const exec = fakeGit({ root: dir, status });
   const { context, calls } = createContext({
     locationDirectory: dir,
@@ -2064,22 +2439,35 @@ test("the commit flow reviews the exact patch before anything is written", async
     "the no-turn fallback asks the newest-turn diff with the flat shape",
   );
   assert.deepEqual(
-    flow.state().files.map((file) => [file.path, file.session, file.unattributed]),
+    flow
+      .state()
+      .files.map((file) => [file.path, file.session, file.unattributed]),
     [
       ["src/a.ts", true, false],
       ["notes.txt", false, true],
     ],
   );
-  assert.deepEqual(flow.state().selection, ["src/a.ts"], "only confirmed session changes start checked");
+  assert.deepEqual(
+    flow.state().selection,
+    ["src/a.ts"],
+    "only confirmed session changes start checked",
+  );
 
   assert.equal(flow.toggle("src/a.ts"), true);
-  assert.deepEqual(flow.state().selection, [], "a preselected file can be unchecked");
+  assert.deepEqual(
+    flow.state().selection,
+    [],
+    "a preselected file can be unchecked",
+  );
   assert.equal(flow.toggle("src/a.ts"), true);
   assert.deepEqual(flow.state().selection, ["src/a.ts"]);
 
   await flow.previewSelection();
   assert.equal(flow.state().step, "preview");
-  assert.equal(flow.state().preview.diff, "diff --git a/src/a.ts b/src/a.ts\n+one line\n");
+  assert.equal(
+    flow.state().preview.diff,
+    "diff --git a/src/a.ts b/src/a.ts\n+one line\n",
+  );
   assert.match(flow.state().preview.stat, /1 file changed/);
   assert.equal(
     gitSubcommands(exec, "commit").length > 0,
@@ -2115,7 +2503,11 @@ test("the commit flow reviews the exact patch before anything is written", async
   // The model's raw suggestion carries a Conventional Commit prefix, which is
   // stripped before the user reviews it; the confirmed text is what commits.
   assert.equal(flow.state().message, "tidy the header");
-  assert.equal(flow.state().draft, "tidy the header", "the editor opens on the draft");
+  assert.equal(
+    flow.state().draft,
+    "tidy the header",
+    "the editor opens on the draft",
+  );
   // The draft is a plain descriptive subject and never models a type prefix.
   for (const field of [flow.state().message, flow.state().draft]) {
     assert.equal(
@@ -2138,17 +2530,38 @@ test("the commit flow reviews the exact patch before anything is written", async
     { providerID: "opencodex", id: "gpt-6-luna", variant: "low" },
     "the native adapter targets Luna at the low variant",
   );
-  assert.equal(payload.prompt.includes(flow.state().preview.diff), true, "the frozen diff is the payload");
+  assert.equal(
+    payload.prompt.includes(flow.state().preview.diff),
+    true,
+    "the frozen diff is the payload",
+  );
   // No subprocess and no session/tool traffic carries the diff.
-  assert.equal(exec.calls.filter((call) => call.file !== "git").length, 0, "no subprocess");
-  assert.equal(options?.signal instanceof AbortSignal, true, "a cancellable signal is passed");
+  assert.equal(
+    exec.calls.filter((call) => call.file !== "git").length,
+    0,
+    "no subprocess",
+  );
+  assert.equal(
+    options?.signal instanceof AbortSignal,
+    true,
+    "a cancellable signal is passed",
+  );
 
   await flow.confirm();
   await until(() => flow.state() === null, "the dialog to close");
-  const committed = gitSubcommands(exec, "commit").find((line) => line.startsWith("commit -m"));
+  const committed = gitSubcommands(exec, "commit").find((line) =>
+    line.startsWith("commit -m"),
+  );
   assert.equal(committed, "commit -m tidy the header");
-  assert.equal(committed.includes("--no-verify"), false, "hooks are never skipped");
-  assert.equal(calls.toasts.at(-1).message, `Committed 1 file · ${COMMIT_TWO.slice(0, 12)}`);
+  assert.equal(
+    committed.includes("--no-verify"),
+    false,
+    "hooks are never skipped",
+  );
+  assert.equal(
+    calls.toasts.at(-1).message,
+    `Committed 1 file · ${COMMIT_TWO.slice(0, 12)}`,
+  );
   assert.equal(calls.dialogs.at(-1).clear, true);
 
   await cleanup();
@@ -2160,7 +2573,8 @@ test("the commit flow reviews the exact patch before anything is written", async
 async function startCommitFlow(options = {}) {
   const dir = options.dir ?? scriptsFixture();
   const tmpRoot = options.tmpRoot ?? path.join(dir, "git-tmp");
-  const status = options.status ?? "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0";
+  const status =
+    options.status ?? "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0";
   const exec = options.exec ?? fakeGit({ root: dir, status });
   const { context, calls } = createContext({
     locationDirectory: dir,
@@ -2200,25 +2614,50 @@ test("the commit message is written by native Luna while the flow says it is bus
 
   // The status line names the model and no prompt opens before it answers.
   assert.equal(flow.state().busy, "generating with Luna");
-  assert.equal(flow.state().message, "", "no message is offered before the model answers");
-  assert.equal(flow.state().step, "preview", "the flow is still on the preview step");
+  assert.equal(
+    flow.state().message,
+    "",
+    "no message is offered before the model answers",
+  );
+  assert.equal(
+    flow.state().step,
+    "preview",
+    "the flow is still on the preview step",
+  );
 
   const [{ payload, options }] = calls.generates;
-  assert.deepEqual(payload.model, { providerID: "opencodex", id: "gpt-6-luna", variant: "low" });
-  assert.equal(payload.prompt.includes(frozen), true, "the frozen selected diff is the payload");
+  assert.deepEqual(payload.model, {
+    providerID: "opencodex",
+    id: "gpt-6-luna",
+    variant: "low",
+  });
   assert.equal(
-    payload.prompt.includes("----- BEGIN DIFF -----") && payload.prompt.includes("----- END DIFF -----"),
+    payload.prompt.includes(frozen),
+    true,
+    "the frozen selected diff is the payload",
+  );
+  assert.equal(
+    payload.prompt.includes("----- BEGIN DIFF -----") &&
+      payload.prompt.includes("----- END DIFF -----"),
     true,
     "the diff is delimited",
   );
-  assert.match(payload.prompt, /untrusted/i, "the diff is marked as untrusted data");
+  assert.match(
+    payload.prompt,
+    /untrusted/i,
+    "the diff is marked as untrusted data",
+  );
   assert.equal(options?.signal instanceof AbortSignal, true);
 
   release();
   await running;
   await until(() => flow.state()?.step === "edit", "the message editor");
   assert.equal(flow.state().busy, "");
-  assert.equal(flow.state().draft, "tidy the header", "the review prefix was stripped");
+  assert.equal(
+    flow.state().draft,
+    "tidy the header",
+    "the review prefix was stripped",
+  );
 
   flow.cancel();
   await flowTest.cleanup();
@@ -2236,8 +2675,15 @@ test("a failed generation is named and leaves the review usable", async () => {
   // The provider's own words can quote the diff, so the user sees a safe
   // diagnostic instead: the raw message never reaches the dashboard.
   assert.equal(result.error.message, "Luna message generation failed");
-  assert.equal(JSON.stringify(flow.state()).includes("provider unavailable"), false);
-  assert.equal(flow.state().step, "preview", "the review comes back, not a dead end");
+  assert.equal(
+    JSON.stringify(flow.state()).includes("provider unavailable"),
+    false,
+  );
+  assert.equal(
+    flow.state().step,
+    "preview",
+    "the review comes back, not a dead end",
+  );
   assert.equal(flow.state().error.code, "generation-failed");
   assert.equal(calls.prompts.length, 0, "no message prompt opens on failure");
   assert.equal(calls.generates.length, 1, "the model was asked exactly once");
@@ -2259,7 +2705,11 @@ test("one Generate action sends once and a repeated press while busy is a no-op"
   const running = flow.approveEgress();
   await until(() => calls.generates.length === 1, "the native generation call");
   assert.equal(flow.state().step, "preview");
-  assert.equal(await flow.approveEgress(), null, "the second press is ignored while busy");
+  assert.equal(
+    await flow.approveEgress(),
+    null,
+    "the second press is ignored while busy",
+  );
   assert.equal(calls.generates.length, 1, "one press sends one generation");
 
   release();
@@ -2287,8 +2737,16 @@ test("a cancelled generation ignores its late answer instead of editing a dead f
 
   release();
   assert.equal(await running, null);
-  assert.equal(flow.state(), null, "a late message must not reopen the cancelled flow");
-  assert.equal(calls.generates.length, 1, "the cancelled attempt was not repeated");
+  assert.equal(
+    flow.state(),
+    null,
+    "a late message must not reopen the cancelled flow",
+  );
+  assert.equal(
+    calls.generates.length,
+    1,
+    "the cancelled attempt was not repeated",
+  );
 
   await flowTest.cleanup();
 });
@@ -2316,12 +2774,24 @@ test("a review frozen while the flow is cancelled is discarded, not leaked", asy
     discarded.push(input?.token);
     return baseDiscard(input);
   };
-  const flowTest = await startCommitFlow({ dir, tmpRoot, exec, service, skipPreview: true });
+  const flowTest = await startCommitFlow({
+    dir,
+    tmpRoot,
+    exec,
+    service,
+    skipPreview: true,
+  });
   const { flow } = flowTest;
 
   const pending = flow.previewSelection();
   await until(
-    () => exec.commands().some((line) => line.startsWith("diff --cached") && line.includes("--patch")),
+    () =>
+      exec
+        .commands()
+        .some(
+          (line) =>
+            line.startsWith("diff --cached") && line.includes("--patch"),
+        ),
     "git freezing the review",
   );
   flow.cancel();
@@ -2329,7 +2799,11 @@ test("a review frozen while the flow is cancelled is discarded, not leaked", asy
 
   release();
   assert.equal(await pending, null);
-  assert.deepEqual(discarded.length, 1, "the review frozen after the cancel is discarded once");
+  assert.deepEqual(
+    discarded.length,
+    1,
+    "the review frozen after the cancel is discarded once",
+  );
   assert.ok(discarded[0], "the discarded token is the frozen review's token");
 
   await flowTest.cleanup();
@@ -2360,7 +2834,11 @@ test("a replacement review discards the earlier frozen token", async () => {
   assert.ok(first, "the first review has a token");
   await flow.previewSelection();
   assert.equal(flow.state().step, "preview");
-  assert.deepEqual(discarded, [first], "the replaced review is discarded exactly once");
+  assert.deepEqual(
+    discarded,
+    [first],
+    "the replaced review is discarded exactly once",
+  );
 
   flow.cancel();
   await flowTest.cleanup();
@@ -2410,19 +2888,47 @@ test("closing the dialog during a commit defers cleanup and still reports the co
 
   flow.cancel();
   assert.equal(flow.state(), null);
-  assert.deepEqual(discarded, [], "a running commit keeps its token and private index");
-  assert.equal(readdirSync(tmpRoot).length, 1, "the private review directory is untouched");
+  assert.deepEqual(
+    discarded,
+    [],
+    "a running commit keeps its token and private index",
+  );
+  assert.equal(
+    readdirSync(tmpRoot).length,
+    1,
+    "the private review directory is untouched",
+  );
 
   release();
   const result = await running;
   assert.equal(result.ok, true, JSON.stringify(result.error));
-  assert.deepEqual(discarded, [token], "the closed flow discards its token exactly once after settle");
+  assert.deepEqual(
+    discarded,
+    [token],
+    "the closed flow discards its token exactly once after settle",
+  );
   assert.equal(flow.state(), null, "the closed flow is not resurrected");
-  assert.equal(calls.toasts.filter((toast) => toast.message.startsWith("Committed")).length, 1);
-  assert.equal(calls.toasts.at(-1).message, `Committed 1 file · ${COMMIT_TWO.slice(0, 12)}`);
+  assert.equal(
+    calls.toasts.filter((toast) => toast.message.startsWith("Committed"))
+      .length,
+    1,
+  );
+  assert.equal(
+    calls.toasts.at(-1).message,
+    `Committed 1 file · ${COMMIT_TWO.slice(0, 12)}`,
+  );
   assert.equal(calls.toasts.at(-1).variant, "info");
-  assert.equal(readdirSync(tmpRoot).length, 0, "the review directory is removed after settle");
-  assert.equal(gitSubcommands(exec, "commit").filter((line) => line.startsWith("commit -m")).length, 1);
+  assert.equal(
+    readdirSync(tmpRoot).length,
+    0,
+    "the review directory is removed after settle",
+  );
+  assert.equal(
+    gitSubcommands(exec, "commit").filter((line) =>
+      line.startsWith("commit -m"),
+    ).length,
+    1,
+  );
 
   await flowTest.cleanup();
 });
@@ -2456,7 +2962,13 @@ test("closing the dialog during a push defers cleanup and still reports the push
     discarded.push(input?.token);
     return baseDiscard(input);
   };
-  const flowTest = await startCommitFlow({ dir, tmpRoot, exec, service, skipPreview: true });
+  const flowTest = await startCommitFlow({
+    dir,
+    tmpRoot,
+    exec,
+    service,
+    skipPreview: true,
+  });
   const { flow, calls, runtime } = flowTest;
   flow.cancel();
 
@@ -2476,12 +2988,22 @@ test("closing the dialog during a push defers cleanup and still reports the push
   release();
   const result = await running;
   assert.equal(result.ok, true, JSON.stringify(result.error));
-  assert.deepEqual(discarded, [token], "the closed flow discards its push token exactly once after settle");
+  assert.deepEqual(
+    discarded,
+    [token],
+    "the closed flow discards its push token exactly once after settle",
+  );
   assert.equal(flow.state(), null, "the closed push flow is not resurrected");
-  assert.equal(calls.toasts.filter((toast) => toast.message.startsWith("Pushed")).length, 1);
+  assert.equal(
+    calls.toasts.filter((toast) => toast.message.startsWith("Pushed")).length,
+    1,
+  );
   assert.equal(calls.toasts.at(-1).message, "Pushed main to origin/main");
   assert.equal(calls.toasts.at(-1).variant, "info");
-  assert.equal(exec.commands().filter((line) => line.includes(" push ")).length, 1);
+  assert.equal(
+    exec.commands().filter((line) => line.includes(" push ")).length,
+    1,
+  );
 
   await flowTest.cleanup();
 });
@@ -2517,7 +3039,13 @@ test("closing a push flow while the preview is pending discards the late token o
     late = await basePreviewPush(input);
     return late;
   };
-  const flowTest = await startCommitFlow({ dir, tmpRoot, exec, service, skipPreview: true });
+  const flowTest = await startCommitFlow({
+    dir,
+    tmpRoot,
+    exec,
+    service,
+    skipPreview: true,
+  });
   const { flow, runtime } = flowTest;
   flow.cancel();
 
@@ -2525,13 +3053,25 @@ test("closing a push flow while the preview is pending discards the late token o
   await previewReached;
   flow.cancel();
   assert.equal(flow.state(), null);
-  assert.deepEqual(discarded, [], "no push token exists until the preview resolves");
+  assert.deepEqual(
+    discarded,
+    [],
+    "no push token exists until the preview resolves",
+  );
 
   release();
   await until(() => discarded.length === 1, "the late push token discard");
-  assert.equal(discarded[0], late.token, "the token created after cancellation is discarded");
+  assert.equal(
+    discarded[0],
+    late.token,
+    "the token created after cancellation is discarded",
+  );
   await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.deepEqual(discarded, [late.token], "the late token is discarded exactly once");
+  assert.deepEqual(
+    discarded,
+    [late.token],
+    "the late token is discarded exactly once",
+  );
   assert.equal(flow.state(), null, "the closed push flow is not resurrected");
 
   await flowTest.cleanup();
@@ -2574,7 +3114,11 @@ test("a commit failure after dialog close reports the hash once and discards the
     await gate;
     return {
       ok: false,
-      error: { code: "reconcile-failed", hash: "abc123def456", message: "the index moved" },
+      error: {
+        code: "reconcile-failed",
+        hash: "abc123def456",
+        message: "the index moved",
+      },
     };
   };
 
@@ -2588,9 +3132,19 @@ test("a commit failure after dialog close reports the hash once and discards the
   const result = await running;
   assert.equal(result.ok, false);
   assert.equal(result.error.hash, "abc123def456");
-  assert.deepEqual(discarded, [token], "the closed flow releases its token once");
+  assert.deepEqual(
+    discarded,
+    [token],
+    "the closed flow releases its token once",
+  );
   assert.equal(flow.state(), null);
-  assert.equal(calls.toasts.filter((toast) => toast.message === "Commit exists as abc123def456 — do not retry").length, 1);
+  assert.equal(
+    calls.toasts.filter(
+      (toast) =>
+        toast.message === "Commit exists as abc123def456 — do not retry",
+    ).length,
+    1,
+  );
   assert.equal(calls.toasts.at(-1).variant, "error");
 
   await flowTest.cleanup();
@@ -2611,7 +3165,13 @@ test("a push failure after dialog close reports the error once and discards the 
     discarded.push(input?.token);
     return baseDiscard(input);
   };
-  const flowTest = await startCommitFlow({ dir, tmpRoot, exec, service, skipPreview: true });
+  const flowTest = await startCommitFlow({
+    dir,
+    tmpRoot,
+    exec,
+    service,
+    skipPreview: true,
+  });
   const { flow, calls, runtime } = flowTest;
   flow.cancel();
   assert.equal(runtime.openGit("push").ok, true);
@@ -2631,7 +3191,10 @@ test("a push failure after dialog close reports the error once and discards the 
     attemptedToken = input.token;
     reachedPush();
     await gate;
-    return { ok: false, error: { code: "push-failed", message: "Push denied by remote" } };
+    return {
+      ok: false,
+      error: { code: "push-failed", message: "Push denied by remote" },
+    };
   };
 
   const running = flow.pushNow();
@@ -2644,9 +3207,18 @@ test("a push failure after dialog close reports the error once and discards the 
   const result = await running;
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "push-failed");
-  assert.deepEqual(discarded, [attemptedToken], "the closed flow releases its push token once");
+  assert.deepEqual(
+    discarded,
+    [attemptedToken],
+    "the closed flow releases its push token once",
+  );
   assert.equal(flow.state(), null);
-  assert.equal(calls.toasts.filter((toast) => toast.message === "Push: Push denied by remote").length, 1);
+  assert.equal(
+    calls.toasts.filter(
+      (toast) => toast.message === "Push: Push denied by remote",
+    ).length,
+    1,
+  );
   assert.equal(calls.toasts.at(-1).variant, "error");
 
   await flowTest.cleanup();
@@ -2702,7 +3274,11 @@ test("a rejecting commit service cannot leak its error or bypass closed-flow cle
   assert.equal(JSON.stringify(calls.toasts).includes("secret-index"), false);
   assert.deepEqual(discarded, [token]);
   assert.equal(flow.state(), null);
-  assert.equal(calls.toasts.filter((toast) => toast.message.includes("outcome is unknown")).length, 1);
+  assert.equal(
+    calls.toasts.filter((toast) => toast.message.includes("outcome is unknown"))
+      .length,
+    1,
+  );
 
   await flowTest.cleanup();
 });
@@ -2722,7 +3298,13 @@ test("a rejecting push service cannot leak its error or bypass closed-flow clean
     discarded.push(input?.token);
     return baseDiscard(input);
   };
-  const flowTest = await startCommitFlow({ dir, tmpRoot, exec, service, skipPreview: true });
+  const flowTest = await startCommitFlow({
+    dir,
+    tmpRoot,
+    exec,
+    service,
+    skipPreview: true,
+  });
   const { flow, calls, runtime } = flowTest;
   flow.cancel();
   assert.equal(runtime.openGit("push").ok, true);
@@ -2747,7 +3329,9 @@ test("a rejecting push service cannot leak its error or bypass closed-flow clean
   const running = flow.pushNow();
   await pushReached;
   flow.cancel();
-  rejectPush(new Error("private remote https://alice:hunter2@example.invalid/repo.git"));
+  rejectPush(
+    new Error("private remote https://alice:hunter2@example.invalid/repo.git"),
+  );
   const result = await running;
 
   assert.equal(result.ok, false);
@@ -2757,7 +3341,11 @@ test("a rejecting push service cannot leak its error or bypass closed-flow clean
   assert.equal(JSON.stringify(calls.toasts).includes("hunter2"), false);
   assert.deepEqual(discarded, [attemptedToken]);
   assert.equal(flow.state(), null);
-  assert.equal(calls.toasts.filter((toast) => toast.message.includes("outcome is unknown")).length, 1);
+  assert.equal(
+    calls.toasts.filter((toast) => toast.message.includes("outcome is unknown"))
+      .length,
+    1,
+  );
 
   await flowTest.cleanup();
 });
@@ -2791,7 +3379,11 @@ test("the preview preflight prefers an available OpenCodex Luna model", async ()
   });
   const { calls, flow } = flowTest;
 
-  assert.equal(flow.state().step, "preview", "the probe completed before the Generate action is offered");
+  assert.equal(
+    flow.state().step,
+    "preview",
+    "the probe completed before the Generate action is offered",
+  );
   assert.deepEqual(flow.state().generator, {
     source: "opencodex",
     providerID: "opencodex",
@@ -2803,13 +3395,21 @@ test("the preview preflight prefers an available OpenCodex Luna model", async ()
   });
   assert.equal(calls.providers.length, 1, "provider metadata was read once");
   assert.equal(calls.models.length, 1, "model metadata was read once");
-  assert.equal(calls.generates.length, 0, "the probe sends no diff and calls no model");
+  assert.equal(
+    calls.generates.length,
+    0,
+    "the probe sends no diff and calls no model",
+  );
 
   assert.equal(flow.state().generator.providerName, "OpenCodex");
   assert.equal(flow.state().generator.id, "gpt-6-luna");
 
   await flow.approveEgress();
-  assert.equal(calls.generates.length, 1, "the diff is sent only after approval");
+  assert.equal(
+    calls.generates.length,
+    1,
+    "the diff is sent only after approval",
+  );
   assert.deepEqual(calls.generates[0].payload.model, {
     providerID: "opencodex",
     id: "gpt-6-luna",
@@ -2899,11 +3499,19 @@ test("when neither provider offers Luna the review cannot generate and sends not
   });
   const { calls, flow } = flowTest;
 
-  assert.equal(flow.state().step, "preview", "the Generate action is not offered without a usable model");
+  assert.equal(
+    flow.state().step,
+    "preview",
+    "the Generate action is not offered without a usable model",
+  );
   assert.equal(flow.state().error.code, "model-unavailable");
   assert.match(flow.state().error.message, /Luna/);
   assert.equal(calls.generates.length, 0, "nothing was sent");
-  assert.equal(await flow.approveEgress(), null, "generation stays unreachable");
+  assert.equal(
+    await flow.approveEgress(),
+    null,
+    "generation stays unreachable",
+  );
 
   flow.cancel();
   await flowTest.cleanup();
@@ -2921,7 +3529,11 @@ test("an unavailable or partial provider probe is refused, never silently proxie
 
     assert.equal(flow.state().step, "preview", "no Generate action is reached");
     assert.equal(flow.state().error.code, "generator-probe-failed");
-    assert.equal(await flow.approveEgress(), null, "generation stays unreachable");
+    assert.equal(
+      await flow.approveEgress(),
+      null,
+      "generation stays unreachable",
+    );
     assert.equal(calls.generates.length, 0, "no diff is sent");
 
     flow.cancel();
@@ -2984,7 +3596,11 @@ test("a native OpenAI generation failure is not retried on another model", async
 
   assert.equal((await flow.approveEgress())?.ok, false);
   assert.equal(flow.state().step, "preview");
-  assert.equal(calls.generates.length, 1, "one approved attempt, no fallback retry");
+  assert.equal(
+    calls.generates.length,
+    1,
+    "one approved attempt, no fallback retry",
+  );
   assert.deepEqual(calls.generates[0].payload.model, {
     providerID: "openai",
     id: "gpt-6-luna",
@@ -2995,14 +3611,21 @@ test("a native OpenAI generation failure is not retried on another model", async
 });
 
 test("an unusable model answer is refused rather than shown", async () => {
-  for (const context of [{ generateMalformed: true }, { generateReply: "   " }]) {
+  for (const context of [
+    { generateMalformed: true },
+    { generateReply: "   " },
+  ]) {
     const flowTest = await startCommitFlow({ context });
     const { calls, flow } = flowTest;
 
     const result = await flow.approveEgress();
     assert.equal(result?.ok, false);
     assert.equal(result.error.code, "empty-message");
-    assert.equal(calls.prompts.length, 0, "no blank commit message is ever offered");
+    assert.equal(
+      calls.prompts.length,
+      0,
+      "no blank commit message is ever offered",
+    );
     assert.equal(flow.state().step, "preview");
 
     flow.cancel();
@@ -3011,7 +3634,9 @@ test("an unusable model answer is refused rather than shown", async () => {
 });
 
 test("a missing native generator is reported before the review can generate, never replaced by a subprocess", async () => {
-  const flowTest = await startCommitFlow({ context: { generateMissing: true } });
+  const flowTest = await startCommitFlow({
+    context: { generateMissing: true },
+  });
   const { calls, exec, flow } = flowTest;
 
   // The adapter is checked before the Generate action: no approval may be offered
@@ -3019,10 +3644,21 @@ test("a missing native generator is reported before the review can generate, nev
   assert.equal(flow.state().step, "preview");
   assert.equal(flow.state().generator, null);
   assert.equal(flow.state().error.code, "generation-unavailable");
-  assert.equal(flow.state().error.message, "No commit message generator is connected");
-  assert.equal(await flow.approveEgress(), null, "generation stays unreachable");
+  assert.equal(
+    flow.state().error.message,
+    "No commit message generator is connected",
+  );
+  assert.equal(
+    await flow.approveEgress(),
+    null,
+    "generation stays unreachable",
+  );
   assert.equal(calls.generates.length, 0);
-  assert.equal(exec.calls.filter((call) => call.file !== "git").length, 0, "no subprocess fallback");
+  assert.equal(
+    exec.calls.filter((call) => call.file !== "git").length,
+    0,
+    "no subprocess fallback",
+  );
 
   flow.cancel();
   await flowTest.cleanup();
@@ -3045,7 +3681,11 @@ test("a service with no generateMessage is refused before the Generate action", 
   assert.equal(flow.state().step, "preview");
   assert.equal(flow.state().generator, null);
   assert.equal(flow.state().error.code, "generation-unavailable");
-  assert.equal(await flow.approveEgress(), null, "generation stays unreachable");
+  assert.equal(
+    await flow.approveEgress(),
+    null,
+    "generation stays unreachable",
+  );
 
   flow.cancel();
   await flowTest.cleanup();
@@ -3056,7 +3696,12 @@ test("a thrown review clears busy and reports a safe generic error", async () =>
   const tmpRoot = path.join(dir, "git-tmp");
   const status = "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0";
   const exec = fakeGit({ root: dir, status, previewThrows: true });
-  const flowTest = await startCommitFlow({ dir, tmpRoot, exec, skipPreview: true });
+  const flowTest = await startCommitFlow({
+    dir,
+    tmpRoot,
+    exec,
+    skipPreview: true,
+  });
   const { flow } = flowTest;
 
   await flow.previewSelection();
@@ -3136,7 +3781,11 @@ test("metadata failure still allows writing a message by hand and never calls a 
     gitSubcommands(exec, "commit").find((line) => line.startsWith("commit -m")),
     "commit -m write the message by hand",
   );
-  assert.equal(calls.generates.length, 0, "the manual path never sends the diff");
+  assert.equal(
+    calls.generates.length,
+    0,
+    "the manual path never sends the diff",
+  );
 
   await flowTest.cleanup();
 });
@@ -3172,7 +3821,11 @@ test("a host that never answers the generator probe times out before the Generat
   assert.equal(flow.state().busy, "checking the Luna generator");
   t.mock.timers.tick(10000);
   assert.ok(await pending, "the review stays mounted after the probe ends");
-  assert.equal(flow.state().step, "preview", "the Generate action is not offered after a timeout");
+  assert.equal(
+    flow.state().step,
+    "preview",
+    "the Generate action is not offered after a timeout",
+  );
   assert.equal(flow.state().generator, null);
   assert.equal(flow.state().error.code, "generator-probe-failed");
   assert.match(flow.state().error.message, /timed out/);
@@ -3223,7 +3876,11 @@ test("a cancelled generator probe ignores a late metadata answer", async () => {
   release();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(await pending, null);
-  assert.equal(flow.state(), null, "a late answer must not reopen a cancelled flow");
+  assert.equal(
+    flow.state(),
+    null,
+    "a late answer must not reopen a cancelled flow",
+  );
   assert.equal(calls.generates.length, 0, "nothing was sent");
 
   await flowTest.cleanup();
@@ -3248,15 +3905,31 @@ test("a generated subject and body keep their blank separator through to the com
   assert.equal(flow.state().message, flow.state().draft);
 
   // The editor is a real multi-line field, so what is typed is what is kept.
-  assert.equal(flow.draftChanged("add the header\n\nBody explains why.\nBecause it is clearer.\n"), true);
-  assert.equal(flow.state().draft, "add the header\n\nBody explains why.\nBecause it is clearer.\n");
-  assert.equal(flow.saveMessage(), "add the header\n\nBody explains why.\nBecause it is clearer.");
+  assert.equal(
+    flow.draftChanged(
+      "add the header\n\nBody explains why.\nBecause it is clearer.\n",
+    ),
+    true,
+  );
+  assert.equal(
+    flow.state().draft,
+    "add the header\n\nBody explains why.\nBecause it is clearer.\n",
+  );
+  assert.equal(
+    flow.saveMessage(),
+    "add the header\n\nBody explains why.\nBecause it is clearer.",
+  );
   assert.equal(flow.state().step, "confirm");
 
   await flow.confirm();
   await until(() => flow.state() === null, "the dialog to close");
-  const committed = gitSubcommands(exec, "commit").find((line) => line.startsWith("commit -m"));
-  assert.equal(committed, "commit -m add the header\n\nBody explains why.\nBecause it is clearer.");
+  const committed = gitSubcommands(exec, "commit").find((line) =>
+    line.startsWith("commit -m"),
+  );
+  assert.equal(
+    committed,
+    "commit -m add the header\n\nBody explains why.\nBecause it is clearer.",
+  );
 
   await flowTest.cleanup();
 });
@@ -3277,7 +3950,11 @@ test("a saved message survives a second edit and still commits once", async () =
   // generated draft. Cancelling a second rewrite leaves the saved message.
   flow.editMessage();
   assert.equal(flow.state().step, "edit");
-  assert.equal(flow.state().draft, "saved subject\n\nSaved body.", "the saved message is the draft");
+  assert.equal(
+    flow.state().draft,
+    "saved subject\n\nSaved body.",
+    "the saved message is the draft",
+  );
   assert.equal(flow.draftChanged("a rewrite that is thrown away"), true);
   assert.equal(flow.cancelMessage(), "saved subject\n\nSaved body.");
   assert.equal(flow.state().message, "saved subject\n\nSaved body.");
@@ -3295,7 +3972,11 @@ test("a saved message survives a second edit and still commits once", async () =
     "commit -m saved subject\n\nSaved body.",
     "the final commit uses the saved message",
   );
-  assert.equal(calls.generates.length, 1, "reopening the editor never sends the diff again");
+  assert.equal(
+    calls.generates.length,
+    1,
+    "reopening the editor never sends the diff again",
+  );
 
   await flowTest.cleanup();
 });
@@ -3307,11 +3988,23 @@ test("clearing the message drops the draft and commits nothing", async () => {
 
     await flow.approveEgress();
     await until(() => flow.state()?.step === "edit", "the message editor");
-    assert.equal(flow.state().draft, "tidy the header", "the generated draft is offered");
+    assert.equal(
+      flow.state().draft,
+      "tidy the header",
+      "the generated draft is offered",
+    );
     assert.equal(flow.draftChanged(typed), true);
     assert.equal(flow.saveMessage(), null, "an empty field saves nothing");
-    assert.equal(flow.state().message, "", "an explicit clear really clears it");
-    assert.equal(flow.state().step, "preview", "the flow goes back, it does not commit");
+    assert.equal(
+      flow.state().message,
+      "",
+      "an explicit clear really clears it",
+    );
+    assert.equal(
+      flow.state().step,
+      "preview",
+      "the flow goes back, it does not commit",
+    );
     assert.match(flow.state().notice, /cleared/i);
     assert.equal(flow.state().error, null);
     assert.equal(await flow.confirm(), null, "there is nothing to confirm");
@@ -3332,7 +4025,11 @@ test("cancelling the editor keeps the draft and still never commits", async () =
 
   const returned = await flow.approveEgress();
   await until(() => flow.state()?.step === "edit", "the message editor");
-  assert.equal(returned, "tidy the header", "the draft is returned for editing");
+  assert.equal(
+    returned,
+    "tidy the header",
+    "the draft is returned for editing",
+  );
   // Typing something else and then cancelling keeps the message the flow had: an
   // edit only ever lands through an explicit save.
   assert.equal(flow.draftChanged("a rewrite that is dropped"), true);
@@ -3362,9 +4059,24 @@ test("the review default checks only confirmed session changes, never unsafe one
         upstream: null,
         ahead: null,
         files: [
-          { path: "src/a.ts", session: true, unattributed: false, blocked: null },
-          { path: "src/conflict.ts", session: true, unattributed: false, blocked: "conflicted" },
-          { path: "notes.txt", session: false, unattributed: true, blocked: null },
+          {
+            path: "src/a.ts",
+            session: true,
+            unattributed: false,
+            blocked: null,
+          },
+          {
+            path: "src/conflict.ts",
+            session: true,
+            unattributed: false,
+            blocked: "conflicted",
+          },
+          {
+            path: "notes.txt",
+            session: false,
+            unattributed: true,
+            blocked: null,
+          },
         ],
         candidates: [],
         unattributed: [],
@@ -3372,7 +4084,15 @@ test("the review default checks only confirmed session changes, never unsafe one
       };
     },
     async preview() {
-      return { ok: true, token: "t1", files: [], diff: "", diffTruncated: false, diffUnavailable: false, stat: "" };
+      return {
+        ok: true,
+        token: "t1",
+        files: [],
+        diff: "",
+        diffTruncated: false,
+        diffUnavailable: false,
+        stat: "",
+      };
     },
     discard() {
       return { ok: true };
@@ -3397,7 +4117,11 @@ test("the review default checks only confirmed session changes, never unsafe one
 
   // The default is exactly the confirmed, safe session change: a blocked session
   // change and an unattributed change are shown but never start checked.
-  assert.deepEqual(flow.state().selection, ["src/a.ts"], "only the safe session change is preselected");
+  assert.deepEqual(
+    flow.state().selection,
+    ["src/a.ts"],
+    "only the safe session change is preselected",
+  );
   assert.deepEqual(
     flow.state().files.map((file) => [file.path, file.blocked]),
     [
@@ -3408,8 +4132,16 @@ test("the review default checks only confirmed session changes, never unsafe one
   );
 
   // A blocked file cannot be selected even by an explicit toggle.
-  assert.equal(flow.toggle("src/conflict.ts"), false, "a blocked file refuses selection");
-  assert.deepEqual(flow.state().selection, ["src/a.ts"], "the blocked file stayed out");
+  assert.equal(
+    flow.toggle("src/conflict.ts"),
+    false,
+    "a blocked file refuses selection",
+  );
+  assert.deepEqual(
+    flow.state().selection,
+    ["src/a.ts"],
+    "the blocked file stayed out",
+  );
   // An unattributed file can be opted in by hand, and back out again.
   assert.equal(flow.toggle("notes.txt"), true);
   assert.deepEqual(flow.state().selection, ["src/a.ts", "notes.txt"]);
@@ -3432,8 +4164,18 @@ test("a reload returns the selection to the deliberate default, not the user's e
         upstream: null,
         ahead: null,
         files: [
-          { path: "src/a.ts", session: true, unattributed: false, blocked: null },
-          { path: "notes.txt", session: false, unattributed: true, blocked: null },
+          {
+            path: "src/a.ts",
+            session: true,
+            unattributed: false,
+            blocked: null,
+          },
+          {
+            path: "notes.txt",
+            session: false,
+            unattributed: true,
+            blocked: null,
+          },
         ],
         candidates: [],
         unattributed: [],
@@ -3441,7 +4183,15 @@ test("a reload returns the selection to the deliberate default, not the user's e
       };
     },
     async preview() {
-      return { ok: true, token: "t1", files: [], diff: "", diffTruncated: false, diffUnavailable: false, stat: "" };
+      return {
+        ok: true,
+        token: "t1",
+        files: [],
+        diff: "",
+        diffTruncated: false,
+        diffUnavailable: false,
+        stat: "",
+      };
     },
     discard() {
       return { ok: true };
@@ -3474,7 +4224,11 @@ test("a reload returns the selection to the deliberate default, not the user's e
   // action's own refresh cannot silently widen what a commit would include.
   await flow.reload();
   assert.equal(flow.state().step, "files");
-  assert.deepEqual(flow.state().selection, ["src/a.ts"], "the reload restores the default, not the edits");
+  assert.deepEqual(
+    flow.state().selection,
+    ["src/a.ts"],
+    "the reload restores the default, not the edits",
+  );
 
   await cleanup();
 });
@@ -3498,7 +4252,14 @@ test("a patch that cannot be shown in full is dropped, never committed blind", a
         head: "h1",
         upstream: null,
         ahead: null,
-        files: [{ path: "src/a.ts", session: true, unattributed: false, blocked: null }],
+        files: [
+          {
+            path: "src/a.ts",
+            session: true,
+            unattributed: false,
+            blocked: null,
+          },
+        ],
         candidates: [],
         unattributed: [],
         statusHash: "hash",
@@ -3581,7 +4342,11 @@ test("a commit that already exists is shown with its hash and never retried", as
 
   runtime.openGit("commit");
   await until(() => flow.state()?.step === "files", "the file list");
-  assert.deepEqual(flow.state().selection, ["src/a.ts"], "the confirmed session change starts checked");
+  assert.deepEqual(
+    flow.state().selection,
+    ["src/a.ts"],
+    "the confirmed session change starts checked",
+  );
   await flow.previewSelection();
   await flow.approveEgress();
   await until(() => flow.state()?.step === "edit", "the message editor");
@@ -3594,7 +4359,11 @@ test("a commit that already exists is shown with its hash and never retried", as
   assert.equal(flow.state().step, "committed");
   assert.equal(flow.state().error.code, "hook-changed-tree");
   assert.equal(flow.state().error.hash, COMMIT_TWO);
-  assert.equal(flow.state().token !== null, true, "the review is still owned for cleanup");
+  assert.equal(
+    flow.state().token !== null,
+    true,
+    "the review is still owned for cleanup",
+  );
   assert.equal(
     calls.toasts.at(-1).message,
     `Commit exists as ${COMMIT_TWO} — do not retry`,
@@ -3606,13 +4375,19 @@ test("a commit that already exists is shown with its hash and never retried", as
   assert.notEqual(flow.state().step, "confirm");
   assert.equal(await flow.confirm(), null);
   assert.equal(await flow.confirmPush(), false);
-  const commits = gitSubcommands(exec, "commit").filter((line) => line.startsWith("commit -m"));
+  const commits = gitSubcommands(exec, "commit").filter((line) =>
+    line.startsWith("commit -m"),
+  );
   assert.equal(commits.length, 1, "one commit was attempted");
 
   // Closing drops the review and leaves the repository alone.
   flow.cancel();
   assert.equal(flow.state(), null);
-  assert.equal(readdirSync(tmpRoot).length, 0, "no review folder is left behind");
+  assert.equal(
+    readdirSync(tmpRoot).length,
+    0,
+    "no review folder is left behind",
+  );
 
   await cleanup();
 });
@@ -3620,7 +4395,11 @@ test("a commit that already exists is shown with its hash and never retried", as
 test("the push flow shows the exact target and never forces", async () => {
   const dir = scriptsFixture();
   const tmpRoot = path.join(dir, "git-tmp");
-  const exec = fakeGit({ root: dir, outgoing: "2", hashes: ["head1", "head0"] });
+  const exec = fakeGit({
+    root: dir,
+    outgoing: "2",
+    hashes: ["head1", "head0"],
+  });
   const { context, calls } = createContext({
     locationDirectory: dir,
     sessions: { s1: { directory: dir } },
@@ -3639,8 +4418,22 @@ test("the push flow shows the exact target and never forces", async () => {
   await until(() => flow.state()?.step === "push-review", "the push review");
   const target = flow.state().push;
   assert.deepEqual(
-    [target.branch, target.remote, target.remoteBranch, target.upstream, target.destination, target.outgoing],
-    ["main", "origin", "main", "origin/main", "git@github.com:acme/repo.git", 2],
+    [
+      target.branch,
+      target.remote,
+      target.remoteBranch,
+      target.upstream,
+      target.destination,
+      target.outgoing,
+    ],
+    [
+      "main",
+      "origin",
+      "main",
+      "origin/main",
+      "git@github.com:acme/repo.git",
+      2,
+    ],
   );
   assert.deepEqual(target.hashes, ["head1", "head0"]);
   assert.equal(flow.state().pushReady, true);
@@ -3665,8 +4458,21 @@ test("the push flow shows the exact target and never forces", async () => {
   // refspec cannot pick another destination.
   assert.equal(pushed.args.at(-1), `${target.head}:refs/heads/main`);
   assert.equal(pushed.args.at(-2), "origin");
-  for (const flag of ["--force", "-f", "--mirror", "--all", "--tags", "--force-with-lease", "--delete", "--prune"]) {
-    assert.equal(pushed.args.includes(flag), false, `the push must not pass ${flag}`);
+  for (const flag of [
+    "--force",
+    "-f",
+    "--mirror",
+    "--all",
+    "--tags",
+    "--force-with-lease",
+    "--delete",
+    "--prune",
+  ]) {
+    assert.equal(
+      pushed.args.includes(flag),
+      false,
+      `the push must not pass ${flag}`,
+    );
   }
   assert.equal(calls.toasts.at(-1).message, "Pushed main to origin/main");
   assert.equal(calls.dialogs.at(-1).clear, true);
@@ -3726,14 +4532,26 @@ test("cancelling a review drops it and leaves the repository alone", async () =>
 
   runtime.openGit("commit");
   await until(() => flow.state()?.step === "files", "the file list");
-  assert.deepEqual(flow.state().selection, ["src/a.ts"], "the confirmed session change starts checked");
+  assert.deepEqual(
+    flow.state().selection,
+    ["src/a.ts"],
+    "the confirmed session change starts checked",
+  );
   await flow.previewSelection();
   assert.equal(flow.state().step, "preview");
-  assert.equal(readdirSync(tmpRoot).length, 1, "the review holds one private index");
+  assert.equal(
+    readdirSync(tmpRoot).length,
+    1,
+    "the review holds one private index",
+  );
 
   flow.cancel();
   assert.equal(flow.state(), null);
-  assert.equal(readdirSync(tmpRoot).length, 0, "cancelling drops the private index");
+  assert.equal(
+    readdirSync(tmpRoot).length,
+    0,
+    "cancelling drops the private index",
+  );
   assert.equal(
     gitSubcommands(exec, "commit").length > 0,
     false,
@@ -3754,8 +4572,14 @@ test("cancelling a push review releases its token so no stale push can run", asy
   const discarded = [];
   const pushed = [];
   const git = {
-    status: async () => ({ ok: false, error: { code: "not-a-repo", message: "Not a git repository" } }),
-    preview: async () => ({ ok: false, error: { code: "no-selection", message: "No files were selected" } }),
+    status: async () => ({
+      ok: false,
+      error: { code: "not-a-repo", message: "Not a git repository" },
+    }),
+    preview: async () => ({
+      ok: false,
+      error: { code: "no-selection", message: "No files were selected" },
+    }),
     previewPush: async () => ({
       ok: true,
       token: "push-t1",
@@ -3770,7 +4594,12 @@ test("cancelling a push review releases its token so no stale push can run", asy
     }),
     push: async (input) => {
       pushed.push(input);
-      return { ok: true, branch: "main", remote: "origin", remoteBranch: "main" };
+      return {
+        ok: true,
+        branch: "main",
+        remote: "origin",
+        remoteBranch: "main",
+      };
     },
     discard: ({ token }) => {
       discarded.push(token);
@@ -3797,7 +4626,11 @@ test("cancelling a push review releases its token so no stale push can run", asy
   // Cancelling releases the frozen push target.
   flow.cancel();
   assert.equal(flow.state(), null);
-  assert.deepEqual(discarded, ["push-t1"], "the cancelled push token is released");
+  assert.deepEqual(
+    discarded,
+    ["push-t1"],
+    "the cancelled push token is released",
+  );
 
   // The flow is gone, so no stale action can push with the released token.
   assert.equal(await flow.pushNow(), null);
@@ -3808,7 +4641,8 @@ test("cancelling a push review releases its token so no stale push can run", asy
 
 test("a live host snapshot supplies the candidate files without the SDK", async () => {
   const dir = scriptsFixture();
-  const status = "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0? notes.txt\0";
+  const status =
+    "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0? notes.txt\0";
   const exec = fakeGit({ root: dir, status });
   const { context, calls } = createContext({
     locationDirectory: dir,
@@ -3830,7 +4664,9 @@ test("a live host snapshot supplies the candidate files without the SDK", async 
   assert.deepEqual(calls.snapshots, ["s1"], "the live snapshot was read");
   assert.deepEqual(calls.diffs, [], "the SDK was not needed");
   assert.deepEqual(
-    flow.state().files.map((file) => [file.path, file.session, file.unattributed]),
+    flow
+      .state()
+      .files.map((file) => [file.path, file.session, file.unattributed]),
     [
       ["src/a.ts", true, false],
       ["notes.txt", false, true],
@@ -3842,7 +4678,8 @@ test("a live host snapshot supplies the candidate files without the SDK", async 
 
 test("an unreadable session diff leaves every file unattributed", async () => {
   const dir = scriptsFixture();
-  const status = "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0? notes.txt\0";
+  const status =
+    "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0? notes.txt\0";
   const exec = fakeGit({ root: dir, status });
   const { context, calls } = createContext({
     locationDirectory: dir,
@@ -3865,7 +4702,9 @@ test("an unreadable session diff leaves every file unattributed", async () => {
   // No evidence, no attribution: the user picks by hand instead of trusting a
   // shape the host did not send.
   assert.deepEqual(
-    flow.state().files.map((file) => [file.path, file.session, file.unattributed]),
+    flow
+      .state()
+      .files.map((file) => [file.path, file.session, file.unattributed]),
     [
       ["src/a.ts", false, true],
       ["notes.txt", false, true],
@@ -3905,10 +4744,18 @@ test("session attribution uses the installed client's message.list and session.d
   assert.deepEqual(calls.diffs, [{ sessionID: "s1", from: "u1" }]);
   for (const request of [...calls.messages, ...calls.diffs]) {
     for (const key of ["path", "before", "directory", "messageID"]) {
-      assert.equal(key in request, false, `${key} is not part of the client contract`);
+      assert.equal(
+        key in request,
+        false,
+        `${key} is not part of the client contract`,
+      );
     }
   }
-  assert.deepEqual(calls.invalid, [], "the fabricated session.messages route is never called");
+  assert.deepEqual(
+    calls.invalid,
+    [],
+    "the fabricated session.messages route is never called",
+  );
   assert.deepEqual(flow.state().selection, ["src/a.ts"]);
 
   // The mock rejects the fabricated shapes outright, so a regression fails.
@@ -3921,12 +4768,22 @@ test("session attribution uses the installed client's message.list and session.d
     /unsupported session diff request key: messageID/,
   );
   await assert.rejects(
-    () => context.client.message.list({ sessionID: "s1", type: "user", before: "u1" }),
+    () =>
+      context.client.message.list({
+        sessionID: "s1",
+        type: "user",
+        before: "u1",
+      }),
     /unsupported message list request/,
   );
   await assert.rejects(
     () =>
-      context.client.message.list({ sessionID: "s1", type: "user", order: "asc", cursor: "c1" }),
+      context.client.message.list({
+        sessionID: "s1",
+        type: "user",
+        order: "asc",
+        cursor: "c1",
+      }),
     /order must not be combined with cursor/,
   );
 
@@ -3935,7 +4792,8 @@ test("session attribution uses the installed client's message.list and session.d
 
 test("an earlier session turn keeps its files attributed when the latest turn changed nothing", async () => {
   const dir = scriptsFixture();
-  const status = "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0? notes.txt\0";
+  const status =
+    "1 .M N... 100644 100644 100644 aaaa bbbb src/a.ts\0? notes.txt\0";
   const exec = fakeGit({ root: dir, status });
   const { context, calls } = createContext({
     locationDirectory: dir,
@@ -3957,9 +4815,15 @@ test("an earlier session turn keeps its files attributed when the latest turn ch
   await until(() => flow.state()?.step === "files", "the file list");
   // The latest turn made no edit; the older turn's file is still a confirmed
   // session change and starts checked.
-  assert.deepEqual(flow.state().selection, ["src/a.ts"], "the earlier turn's file starts checked");
   assert.deepEqual(
-    flow.state().files.map((file) => [file.path, file.session, file.unattributed]),
+    flow.state().selection,
+    ["src/a.ts"],
+    "the earlier turn's file starts checked",
+  );
+  assert.deepEqual(
+    flow
+      .state()
+      .files.map((file) => [file.path, file.session, file.unattributed]),
     [
       ["src/a.ts", true, false],
       ["notes.txt", false, true],
@@ -4014,9 +4878,17 @@ test("a multi-page user history is walked with the opaque cursor", async () => {
     ],
     "the walk follows cursor.next to the older page",
   );
-  assert.deepEqual(flow.state().selection, ["src/a.ts"], "a turn from the first page still attributes");
+  assert.deepEqual(
+    flow.state().selection,
+    ["src/a.ts"],
+    "a turn from the first page still attributes",
+  );
   // More turns than the per-click cap are diffed, and the omission is stated.
-  assert.match(flow.state().notice, /could not be read/, "unwalked turns are disclosed");
+  assert.match(
+    flow.state().notice,
+    /could not be read/,
+    "unwalked turns are disclosed",
+  );
 
   await cleanup();
 });
@@ -4107,9 +4979,17 @@ test("a failed message list read falls back to the flat diff and warns", async (
 
   runtime.openGit("commit");
   await until(() => flow.state()?.step === "files", "the file list");
-  assert.deepEqual(flow.state().selection, ["src/a.ts"], "the flat diff still attributes the newest turn");
+  assert.deepEqual(
+    flow.state().selection,
+    ["src/a.ts"],
+    "the flat diff still attributes the newest turn",
+  );
   assert.deepEqual(calls.diffs, [{ sessionID: "s1" }]);
-  assert.match(flow.state().notice, /could not be read/, "the partial read is stated, not hidden");
+  assert.match(
+    flow.state().notice,
+    /could not be read/,
+    "the partial read is stated, not hidden",
+  );
 
   await cleanup();
 });
@@ -4137,7 +5017,11 @@ test("a malformed message list response falls back to the flat diff and warns", 
   runtime.openGit("commit");
   await until(() => flow.state()?.step === "files", "the file list");
   assert.deepEqual(flow.state().selection, ["src/a.ts"]);
-  assert.equal(calls.messages.length, 1, "the message list is tried once, not retried");
+  assert.equal(
+    calls.messages.length,
+    1,
+    "the message list is tried once, not retried",
+  );
   assert.match(flow.state().notice, /could not be read/);
 
   await cleanup();
@@ -4202,7 +5086,11 @@ test("a host without message.list falls back to the newest-turn diff and warns",
   assert.deepEqual(flow.state().selection, ["src/a.ts"]);
   assert.equal(calls.messages.length, 0, "an absent route is not called");
   assert.deepEqual(calls.diffs, [{ sessionID: "s1" }]);
-  assert.match(flow.state().notice, /could not be read/, "one turn cannot stand for the history");
+  assert.match(
+    flow.state().notice,
+    /could not be read/,
+    "one turn cannot stand for the history",
+  );
 
   await cleanup();
 });
@@ -4231,8 +5119,16 @@ test("a history beyond the page cap warns instead of silently dropping turns", a
 
   runtime.openGit("commit");
   await until(() => flow.state()?.step === "files", "the file list");
-  assert.equal(calls.messages.length, 20, "the walk stops at the bounded page cap");
-  assert.match(flow.state().notice, /longer than one read/, "the truncation is stated, not hidden");
+  assert.equal(
+    calls.messages.length,
+    20,
+    "the walk stops at the bounded page cap",
+  );
+  assert.match(
+    flow.state().notice,
+    /longer than one read/,
+    "the truncation is stated, not hidden",
+  );
 
   await cleanup();
 });
@@ -4244,14 +5140,22 @@ test("a child and grandchild session contribute only their own confirmed files",
   const exec = fakeGit({ root: dir, status });
   const { context, calls } = createContext({
     locationDirectory: dir,
-    sessions: { s1: { directory: dir }, c1: { directory: dir }, g1: { directory: dir } },
+    sessions: {
+      s1: { directory: dir },
+      c1: { directory: dir },
+      g1: { directory: dir },
+    },
     route: () => ({ type: "session", sessionID: "s1" }),
     messageItems: {
       s1: [messageTurn("u1", 100)],
       c1: [messageTurn("cu1", 100)],
       g1: [messageTurn("gu1", 100)],
     },
-    messageDiffFiles: { u1: ["root.ts"], cu1: ["child.txt"], gu1: ["grand.txt"] },
+    messageDiffFiles: {
+      u1: ["root.ts"],
+      cu1: ["child.txt"],
+      gu1: ["grand.txt"],
+    },
     sessionChildren: { s1: ["c1"], c1: ["g1"] },
   });
   const cleanup = await startPlugin(context, view, {
@@ -4296,14 +5200,19 @@ test("a child and grandchild session contribute only their own confirmed files",
     ],
     "a file outside the tree stays unattributed",
   );
-  assert.equal(flow.state().notice, "", "a complete child walk needs no warning");
+  assert.equal(
+    flow.state().notice,
+    "",
+    "a complete child walk needs no warning",
+  );
 
   await cleanup();
 });
 
 test("an OMO slim child uses the same native parentID representation", async () => {
   const dir = scriptsFixture();
-  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? omo.txt\0";
+  const status =
+    "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? omo.txt\0";
   const exec = fakeGit({ root: dir, status });
   // OMO slim creates the child through the native session route, so the listing
   // returns full `SessionInfo` records carrying `parentID` - no OMO-only shape.
@@ -4352,11 +5261,16 @@ test("an OMO slim child uses the same native parentID representation", async () 
 
 test("a session outside the parentID tree is never traversed or attributed", async () => {
   const dir = scriptsFixture();
-  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? kept.txt\0? foreign.txt\0? worse.txt\0";
+  const status =
+    "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? kept.txt\0? foreign.txt\0? worse.txt\0";
   const exec = fakeGit({ root: dir, status });
   const { context, calls } = createContext({
     locationDirectory: dir,
-    sessions: { s1: { directory: dir }, other: { directory: dir }, evil: { directory: dir } },
+    sessions: {
+      s1: { directory: dir },
+      other: { directory: dir },
+      evil: { directory: dir },
+    },
     route: () => ({ type: "session", sessionID: "s1" }),
     messageItems: {
       s1: [messageTurn("u1", 100)],
@@ -4364,7 +5278,12 @@ test("a session outside the parentID tree is never traversed or attributed", asy
       other: [messageTurn("ou1", 100)],
       evil: [messageTurn("eu1", 100)],
     },
-    messageDiffFiles: { u1: ["root.ts"], cu1: ["kept.txt"], ou1: ["foreign.txt"], eu1: ["worse.txt"] },
+    messageDiffFiles: {
+      u1: ["root.ts"],
+      cu1: ["kept.txt"],
+      ou1: ["foreign.txt"],
+      eu1: ["worse.txt"],
+    },
     sessionChildren: {
       // A record claiming another parent is not a child of `s1`. A non-string id
       // is not a session, and a deeper record claiming `s1` is not a child of `c1`.
@@ -4414,11 +5333,15 @@ test("a session outside the parentID tree is never traversed or attributed", asy
 
 test("a long child list is paged with the opaque cursor", async () => {
   const dir = scriptsFixture();
-  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? late.txt\0";
+  const status =
+    "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? late.txt\0";
   const exec = fakeGit({ root: dir, status });
   const children = [];
   for (let i = 0; i < 45; i += 1) children.push(`c${i}`);
-  const messageItems = { s1: [messageTurn("u1", 100)], c44: [messageTurn("cu44", 100)] };
+  const messageItems = {
+    s1: [messageTurn("u1", 100)],
+    c44: [messageTurn("cu44", 100)],
+  };
   const messageDiffFiles = { u1: ["root.ts"], cu44: ["late.txt"] };
   const { context, calls } = createContext({
     locationDirectory: dir,
@@ -4460,13 +5383,17 @@ test("a long child list is paged with the opaque cursor", async () => {
 
 test("duplicate and cyclic child records are visited once", async () => {
   const dir = scriptsFixture();
-  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? deep.txt\0";
+  const status =
+    "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? deep.txt\0";
   const exec = fakeGit({ root: dir, status });
   const { context, calls } = createContext({
     locationDirectory: dir,
     sessions: { s1: { directory: dir } },
     route: () => ({ type: "session", sessionID: "s1" }),
-    messageItems: { s1: [messageTurn("u1", 100)], g1: [messageTurn("gu1", 100)] },
+    messageItems: {
+      s1: [messageTurn("u1", 100)],
+      g1: [messageTurn("gu1", 100)],
+    },
     messageDiffFiles: { u1: ["root.ts"], gu1: ["deep.txt"] },
     sessionChildren: {
       // The same child appears three times, and the child lists the root back.
@@ -4499,7 +5426,8 @@ test("duplicate and cyclic child records are visited once", async () => {
 
 test("a failed grandchild listing keeps the root and confirmed children and warns", async () => {
   const dir = scriptsFixture();
-  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? child.txt\0? sibling.txt\0? lost.txt\0";
+  const status =
+    "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? child.txt\0? sibling.txt\0? lost.txt\0";
   const exec = fakeGit({ root: dir, status });
   const { context, calls } = createContext({
     locationDirectory: dir,
@@ -4542,12 +5470,15 @@ test("a failed grandchild listing keeps the root and confirmed children and warn
     /Child session changes could not be read/,
     "the partial child read is disclosed",
   );
-  assert.deepEqual(flow.state().files.map((file) => [file.path, file.session]), [
-    ["root.ts", true],
-    ["child.txt", true],
-    ["sibling.txt", true],
-    ["lost.txt", false],
-  ]);
+  assert.deepEqual(
+    flow.state().files.map((file) => [file.path, file.session]),
+    [
+      ["root.ts", true],
+      ["child.txt", true],
+      ["sibling.txt", true],
+      ["lost.txt", false],
+    ],
+  );
 
   await cleanup();
 });
@@ -4575,7 +5506,11 @@ test("a malformed child list response keeps the root attribution and warns", asy
 
   runtime.openGit("commit");
   await until(() => flow.state()?.step === "files", "the file list");
-  assert.deepEqual(flow.state().selection, ["root.ts"], "the root is never erased by a bad child page");
+  assert.deepEqual(
+    flow.state().selection,
+    ["root.ts"],
+    "the root is never erased by a bad child page",
+  );
   assert.match(flow.state().notice, /Child session changes could not be read/);
   assert.doesNotMatch(
     flow.state().notice,
@@ -4588,18 +5523,24 @@ test("a malformed child list response keeps the root attribution and warns", asy
 
 test("a child cursor that does not advance stops the walk and warns", async () => {
   const dir = scriptsFixture();
-  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? other.txt\0";
+  const status =
+    "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? other.txt\0";
   const exec = fakeGit({ root: dir, status });
   const { context, calls } = createContext({
     locationDirectory: dir,
     sessions: { s1: { directory: dir } },
     route: () => ({ type: "session", sessionID: "s1" }),
-    messageItems: { s1: [messageTurn("u1", 100)], c1: [messageTurn("cu1", 100)] },
+    messageItems: {
+      s1: [messageTurn("u1", 100)],
+      c1: [messageTurn("cu1", 100)],
+    },
     messageDiffFiles: { u1: ["root.ts"], cu1: ["other.txt"] },
     sessionChildren: { s1: ["c1"] },
     // The first page hides `c1` behind a cursor that never advances.
     sessionListRecords: (options) =>
-      options.parentID === "s1" ? { data: [], cursor: { previous: null, next: "c0" } } : null,
+      options.parentID === "s1"
+        ? { data: [], cursor: { previous: null, next: "c0" } }
+        : null,
   });
   const cleanup = await startPlugin(context, view, {
     spawn: createFakeSpawn(),
@@ -4612,9 +5553,21 @@ test("a child cursor that does not advance stops the walk and warns", async () =
 
   runtime.openGit("commit");
   await until(() => flow.state()?.step === "files", "the file list");
-  assert.deepEqual(flow.state().selection, ["root.ts"], "an unmoving cursor cannot loop or invent children");
-  assert.equal(calls.sessions.length, 1, "the page is asked once and then abandoned");
-  assert.match(flow.state().notice, /larger than one read/, "the dropped page is stated");
+  assert.deepEqual(
+    flow.state().selection,
+    ["root.ts"],
+    "an unmoving cursor cannot loop or invent children",
+  );
+  assert.equal(
+    calls.sessions.length,
+    1,
+    "the page is asked once and then abandoned",
+  );
+  assert.match(
+    flow.state().notice,
+    /larger than one read/,
+    "the dropped page is stated",
+  );
 
   await cleanup();
 });
@@ -4649,7 +5602,11 @@ test("a child tree beyond the node cap warns instead of silently truncating", as
 
   runtime.openGit("commit");
   await until(() => flow.state()?.step === "files", "the file list");
-  assert.equal(calls.sessions.length, 43, "the walk stops at the node cap (3 pages for the root)");
+  assert.equal(
+    calls.sessions.length,
+    43,
+    "the walk stops at the node cap (3 pages for the root)",
+  );
   assert.match(
     flow.state().notice,
     /larger than one read/,
@@ -4661,8 +5618,12 @@ test("a child tree beyond the node cap warns instead of silently truncating", as
 
 test("the child walk uses the captured session and directory after a tab switch", async () => {
   const first = scriptsFixture();
-  const second = fixture({ "package.json": { scripts: {} }, "local-public-defines.json": "{}" });
-  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? child.txt\0";
+  const second = fixture({
+    "package.json": { scripts: {} },
+    "local-public-defines.json": "{}",
+  });
+  const status =
+    "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? child.txt\0";
   const exec = fakeGit({ root: first, status });
   let session = "s1";
   let release;
@@ -4678,7 +5639,11 @@ test("the child walk uses the captured session and directory after a tab switch"
       c1: [messageTurn("cu1", 100)],
       s2: [messageTurn("su1", 100)],
     },
-    messageDiffFiles: { u1: ["root.ts"], cu1: ["child.txt"], su1: ["foreign.txt"] },
+    messageDiffFiles: {
+      u1: ["root.ts"],
+      cu1: ["child.txt"],
+      su1: ["foreign.txt"],
+    },
     sessionChildren: { s1: ["c1"], s2: ["x1"] },
     sessionListGate: async () => {
       await gate;
@@ -4706,21 +5671,29 @@ test("the child walk uses the captured session and directory after a tab switch"
     "every child request uses the captured session tree, and none filters by folder",
   );
   for (const request of calls.sessions) {
-    assert.equal("directory" in request, false, "the list query never filters by folder");
+    assert.equal(
+      "directory" in request,
+      false,
+      "the list query never filters by folder",
+    );
   }
   assert.deepEqual(
     calls.messages.map((request) => request.sessionID),
     ["s1", "c1"],
     "the newly active session is never read into the open flow",
   );
-  assert.deepEqual([...flow.state().selection].sort(), ["child.txt", "root.ts"]);
+  assert.deepEqual([...flow.state().selection].sort(), [
+    "child.txt",
+    "root.ts",
+  ]);
 
   await cleanup();
 });
 
 test("a host without session.list keeps the root attribution and warns", async () => {
   const dir = scriptsFixture();
-  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? other.txt\0";
+  const status =
+    "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? other.txt\0";
   const exec = fakeGit({ root: dir, status });
   const { context, calls } = createContext({
     locationDirectory: dir,
@@ -4755,14 +5728,21 @@ test("a host without session.list keeps the root attribution and warns", async (
 
 test("a child in another folder is skipped and named in the warning", async () => {
   const dir = scriptsFixture();
-  const other = fixture({ "package.json": { scripts: {} }, "local-public-defines.json": "{}" });
-  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? local.txt\0";
+  const other = fixture({
+    "package.json": { scripts: {} },
+    "local-public-defines.json": "{}",
+  });
+  const status =
+    "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? local.txt\0";
   const exec = fakeGit({ root: dir, status });
   const { context, calls } = createContext({
     locationDirectory: dir,
     sessions: { s1: { directory: dir }, c1: { directory: other } },
     route: () => ({ type: "session", sessionID: "s1" }),
-    messageItems: { s1: [messageTurn("u1", 100)], c1: [messageTurn("cu1", 100)] },
+    messageItems: {
+      s1: [messageTurn("u1", 100)],
+      c1: [messageTurn("cu1", 100)],
+    },
     messageDiffFiles: { u1: ["root.ts"], cu1: ["local.txt"] },
     sessionChildren: { s1: [{ id: "c1", parentID: "s1", directory: other }] },
   });
@@ -4779,8 +5759,14 @@ test("a child in another folder is skipped and named in the warning", async () =
   await until(() => flow.state()?.step === "files", "the file list");
   // The list query never filters by folder, so the child is discovered; its own
   // folder does not match the captured one, so its same-named file is not taken.
-  assert.deepEqual(calls.sessions.map((request) => request.parentID), ["s1"]);
-  assert.deepEqual(calls.messages.map((request) => request.sessionID), ["s1"]);
+  assert.deepEqual(
+    calls.sessions.map((request) => request.parentID),
+    ["s1"],
+  );
+  assert.deepEqual(
+    calls.messages.map((request) => request.sessionID),
+    ["s1"],
+  );
   assert.deepEqual(flow.state().selection, ["root.ts"]);
   assert.deepEqual(
     flow.state().files.map((file) => [file.path, file.session]),
@@ -4797,7 +5783,8 @@ test("a child in another folder is skipped and named in the warning", async () =
 
 test("a child without a verifiable folder is skipped and warned", async () => {
   const dir = scriptsFixture();
-  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? loc.txt\0? ghost.txt\0";
+  const status =
+    "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? loc.txt\0? ghost.txt\0";
   const exec = fakeGit({ root: dir, status });
   const { context, calls } = createContext({
     locationDirectory: dir,
@@ -4860,7 +5847,8 @@ test("a child without a verifiable folder is skipped and warned", async () => {
 
 test("the depth probe honours a child page that cannot advance", async () => {
   const dir = scriptsFixture();
-  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? other.txt\0";
+  const status =
+    "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? other.txt\0";
   const exec = fakeGit({ root: dir, status });
   const { context, calls } = createContext({
     locationDirectory: dir,
@@ -4877,7 +5865,9 @@ test("the depth probe honours a child page that cannot advance", async () => {
     sessionChildren: { s1: ["c1"], c1: ["c2"], c2: ["c3"], c3: ["c4"] },
     // At the depth cap the probe sees a cursor that never adds a child.
     sessionListRecords: (options) =>
-      options.parentID === "c4" ? { data: [], cursor: { previous: null, next: "c9" } } : null,
+      options.parentID === "c4"
+        ? { data: [], cursor: { previous: null, next: "c9" } }
+        : null,
   });
   const cleanup = await startPlugin(context, view, {
     spawn: createFakeSpawn(),
@@ -4908,13 +5898,17 @@ test("the depth probe honours a child page that cannot advance", async () => {
 
 test("a malformed child page keeps the children already confirmed and warns", async () => {
   const dir = scriptsFixture();
-  const status = "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? child.txt\0? other.txt\0";
+  const status =
+    "1 .M N... 100644 100644 100644 aaaa bbbb root.ts\0? child.txt\0? other.txt\0";
   const exec = fakeGit({ root: dir, status });
   const { context, calls } = createContext({
     locationDirectory: dir,
     sessions: { s1: { directory: dir }, c1: { directory: dir } },
     route: () => ({ type: "session", sessionID: "s1" }),
-    messageItems: { s1: [messageTurn("u1", 100)], c1: [messageTurn("cu1", 100)] },
+    messageItems: {
+      s1: [messageTurn("u1", 100)],
+      c1: [messageTurn("cu1", 100)],
+    },
     messageDiffFiles: { u1: ["root.ts"], cu1: ["child.txt"] },
     sessionListRecords: (options) => {
       if (options.parentID !== "s1") return null;
@@ -4945,7 +5939,10 @@ test("a malformed child page keeps the children already confirmed and warns", as
     ],
     "the walk stops at the malformed page",
   );
-  assert.deepEqual([...flow.state().selection].sort(), ["child.txt", "root.ts"]);
+  assert.deepEqual([...flow.state().selection].sort(), [
+    "child.txt",
+    "root.ts",
+  ]);
   assert.match(flow.state().notice, /Child session changes could not be read/);
 
   await cleanup();
@@ -4975,7 +5972,14 @@ test("a confirmed session change that git blocks is never preselected", async ()
   runtime.openGit("commit");
   await until(() => flow.state()?.step === "files", "the file list");
   assert.deepEqual(
-    flow.state().files.map((file) => [file.path, file.session, file.unattributed, file.blocked]),
+    flow
+      .state()
+      .files.map((file) => [
+        file.path,
+        file.session,
+        file.unattributed,
+        file.blocked,
+      ]),
     [["escape", true, false, "symlink-escape"]],
     "attribution is recorded, but the blocked file stays out of the selection",
   );
@@ -5007,7 +6011,8 @@ test("reading session attribution performs no git mutation", async () => {
   runtime.openGit("commit");
   await until(() => flow.state()?.step === "files", "the file list");
   const mutating = exec.calls.filter(
-    (call) => call.file === "git" && ["add", "commit", "push"].includes(call.args[0]),
+    (call) =>
+      call.file === "git" && ["add", "commit", "push"].includes(call.args[0]),
   );
   assert.deepEqual(mutating, [], "opening the flow only reads");
 
@@ -5036,7 +6041,11 @@ test("escape cancels the flow through the dialog's own close hook", async () => 
 
   runtime.openGit("commit");
   await until(() => flow.state()?.step === "files", "the file list");
-  assert.deepEqual(flow.state().selection, ["src/a.ts"], "the confirmed session change starts checked");
+  assert.deepEqual(
+    flow.state().selection,
+    ["src/a.ts"],
+    "the confirmed session change starts checked",
+  );
   await flow.previewSelection();
 
   // The host closes the top dialog on escape and calls this hook. The flow ends
@@ -5047,7 +6056,11 @@ test("escape cancels the flow through the dialog's own close hook", async () => 
   assert.equal(readdirSync(tmpRoot).length, 0, "the review is dropped");
   // The host already popped the dialog for escape, so the flow must not ask for
   // a second clear.
-  assert.equal(calls.dialogs.at(-1).clear, undefined, "the host pops the dialog itself");
+  assert.equal(
+    calls.dialogs.at(-1).clear,
+    undefined,
+    "the host pops the dialog itself",
+  );
   assert.equal(
     gitSubcommands(exec, "commit").length > 0,
     false,
@@ -5110,7 +6123,15 @@ function ignoreService({ root, files, onAgitignore, statusFiles } = {}) {
     },
     async preview() {
       calls.preview += 1;
-      return { ok: true, token: "t1", files: [], diff: "", diffTruncated: false, diffUnavailable: false, stat: "" };
+      return {
+        ok: true,
+        token: "t1",
+        files: [],
+        diff: "",
+        diffTruncated: false,
+        diffUnavailable: false,
+        stat: "",
+      };
     },
     async addToGitignore(input) {
       calls.ignore.push(input);
@@ -5121,16 +6142,32 @@ function ignoreService({ root, files, onAgitignore, statusFiles } = {}) {
       return { ok: true };
     },
   };
-  return { git, calls, setFiles: (next) => { current = next; } };
+  return {
+    git,
+    calls,
+    setFiles: (next) => {
+      current = next;
+    },
+  };
 }
 
 function gitFile(path, extra = {}) {
-  return { path, status: "untracked", session: false, unattributed: true, blocked: null, ...extra };
+  return {
+    path,
+    status: "untracked",
+    session: false,
+    unattributed: true,
+    blocked: null,
+    ...extra,
+  };
 }
 
 test("the ignore action writes the click-time folder, not the active tab", async () => {
   const first = scriptsFixture();
-  const second = fixture({ "package.json": { scripts: {} }, "local-public-defines.json": "{}" });
+  const second = fixture({
+    "package.json": { scripts: {} },
+    "local-public-defines.json": "{}",
+  });
   let session = "s1";
   const { git, calls: gitCalls } = ignoreService({
     root: first,
@@ -5159,8 +6196,16 @@ test("the ignore action writes the click-time folder, not the active tab", async
   session = "s2";
   const result = await flow.ignoreFile("notes.txt");
   assert.equal(result.ok, true);
-  assert.deepEqual(gitCalls.ignore, [{ cwd: first, file: "notes.txt" }], "the captured folder is written");
-  assert.deepEqual(gitCalls.status, [first, first], "the refresh rereads the captured folder");
+  assert.deepEqual(
+    gitCalls.ignore,
+    [{ cwd: first, file: "notes.txt" }],
+    "the captured folder is written",
+  );
+  assert.deepEqual(
+    gitCalls.status,
+    [first, first],
+    "the refresh rereads the captured folder",
+  );
 
   await cleanup();
 });
@@ -5168,7 +6213,11 @@ test("the ignore action writes the click-time folder, not the active tab", async
 test("only an untracked, unflagged file can be ignored", async () => {
   const dir = scriptsFixture();
   const files = [
-    gitFile("src/a.ts", { status: "modified", session: true, unattributed: false }),
+    gitFile("src/a.ts", {
+      status: "modified",
+      session: true,
+      unattributed: false,
+    }),
     gitFile("conflict.ts", { blocked: "conflicted" }),
     gitFile("notes.txt"),
   ];
@@ -5198,9 +6247,20 @@ test("only an untracked, unflagged file can be ignored", async () => {
   assert.equal(await flow.ignoreFile("src/a.ts"), null);
   assert.equal(await flow.ignoreFile("conflict.ts"), null);
   assert.equal(await flow.ignoreFile("missing.txt"), null);
-  assert.deepEqual(gitCalls.ignore, [], "no write for a tracked, blocked or absent file");
-  assert.equal(flow.state().error, null, "a refused row is silent, not an error");
-  assert.deepEqual(flow.state().files.map((file) => file.path), files.map((file) => file.path));
+  assert.deepEqual(
+    gitCalls.ignore,
+    [],
+    "no write for a tracked, blocked or absent file",
+  );
+  assert.equal(
+    flow.state().error,
+    null,
+    "a refused row is silent, not an error",
+  );
+  assert.deepEqual(
+    flow.state().files.map((file) => file.path),
+    files.map((file) => file.path),
+  );
 
   await cleanup();
 });
@@ -5224,7 +6284,15 @@ test("a service without the ignore step reports it instead of crashing", async (
       };
     },
     async preview() {
-      return { ok: true, token: "t1", files: [], diff: "", diffTruncated: false, diffUnavailable: false, stat: "" };
+      return {
+        ok: true,
+        token: "t1",
+        files: [],
+        diff: "",
+        diffTruncated: false,
+        diffUnavailable: false,
+        stat: "",
+      };
     },
   };
   const { context, calls } = createContext({
@@ -5248,7 +6316,11 @@ test("a service without the ignore step reports it instead of crashing", async (
   assert.equal(flow.state().error.code, "ignore-unavailable");
   assert.equal(calls.toasts.at(-1).variant, "error");
   assert.match(calls.toasts.at(-1).message, /missing the ignore step/);
-  assert.deepEqual(flow.state().files.map((file) => file.path), ["notes.txt"], "the list is kept");
+  assert.deepEqual(
+    flow.state().files.map((file) => file.path),
+    ["notes.txt"],
+    "the list is kept",
+  );
 
   await cleanup();
 });
@@ -5258,10 +6330,17 @@ test("a refused ignore keeps the list, the selection and the target", async () =
   const { git, calls: gitCalls } = ignoreService({
     root: dir,
     files: [
-      gitFile("src/a.ts", { status: "modified", session: true, unattributed: false }),
+      gitFile("src/a.ts", {
+        status: "modified",
+        session: true,
+        unattributed: false,
+      }),
       gitFile("notes.txt"),
     ],
-    onAgitignore: () => ({ ok: false, error: { code: "ignore-failed", message: "permission denied" } }),
+    onAgitignore: () => ({
+      ok: false,
+      error: { code: "ignore-failed", message: "permission denied" },
+    }),
   });
   const { context, calls } = createContext({
     locationDirectory: dir,
@@ -5287,13 +6366,21 @@ test("a refused ignore keeps the list, the selection and the target", async () =
   assert.equal(result.ok, false);
   assert.equal(flow.state().step, "files", "the flow stays on the file list");
   assert.equal(flow.state().busy, "", "the busy flag is cleared");
-  assert.equal(flow.state().error.message, "permission denied", "the error stays visible");
+  assert.equal(
+    flow.state().error.message,
+    "permission denied",
+    "the error stays visible",
+  );
   assert.deepEqual(
     flow.state().files.map((file) => file.path),
     ["src/a.ts", "notes.txt"],
     "the target is still listed",
   );
-  assert.deepEqual(flow.state().selection, ["src/a.ts", "notes.txt"], "the manual choices survive");
+  assert.deepEqual(
+    flow.state().selection,
+    ["src/a.ts", "notes.txt"],
+    "the manual choices survive",
+  );
   assert.equal(gitCalls.status.length, 1, "a failure does not refresh");
   assert.equal(calls.toasts.at(-1).variant, "error");
 
@@ -5305,7 +6392,11 @@ test("a rejected ignore service call is reported and clears the busy row", async
   const { git, calls: gitCalls } = ignoreService({
     root: dir,
     files: [
-      gitFile("src/a.ts", { status: "modified", session: true, unattributed: false }),
+      gitFile("src/a.ts", {
+        status: "modified",
+        session: true,
+        unattributed: false,
+      }),
       gitFile("notes.txt"),
     ],
     onAgitignore: () => {
@@ -5334,9 +6425,17 @@ test("a rejected ignore service call is reported and clears the busy row", async
   assert.equal(result.error.code, "ignore-failed");
   assert.match(result.error.message, /gitignore write denied/);
   assert.equal(flow.state().step, "files", "the flow stays on the file list");
-  assert.equal(flow.state().busy, "", "the busy flag is cleared after a rejection");
+  assert.equal(
+    flow.state().busy,
+    "",
+    "the busy flag is cleared after a rejection",
+  );
   assert.match(flow.state().error.message, /gitignore write denied/);
-  assert.equal(gitCalls.status.length, 1, "a rejection does not refresh the list");
+  assert.equal(
+    gitCalls.status.length,
+    1,
+    "a rejection does not refresh the list",
+  );
   assert.equal(calls.toasts.at(-1).variant, "error");
   assert.match(calls.toasts.at(-1).message, /^Ignore: /);
 
@@ -5346,12 +6445,20 @@ test("a rejected ignore service call is reported and clears the busy row", async
 test("a successful ignore refreshes the list, drops the target and keeps manual choices", async () => {
   const dir = scriptsFixture();
   const first = [
-    gitFile("src/a.ts", { status: "modified", session: true, unattributed: false }),
+    gitFile("src/a.ts", {
+      status: "modified",
+      session: true,
+      unattributed: false,
+    }),
     gitFile("notes.txt"),
     gitFile("junk.log"),
   ];
   const second = [
-    gitFile("src/a.ts", { status: "modified", session: true, unattributed: false }),
+    gitFile("src/a.ts", {
+      status: "modified",
+      session: true,
+      unattributed: false,
+    }),
     gitFile("notes.txt"),
     gitFile(".gitignore"),
   ];
@@ -5379,7 +6486,11 @@ test("a successful ignore refreshes the list, drops the target and keeps manual 
   assert.deepEqual(flow.state().selection, ["src/a.ts"]);
   flow.toggle("notes.txt");
   flow.toggle("junk.log");
-  assert.deepEqual(flow.state().selection, ["src/a.ts", "notes.txt", "junk.log"]);
+  assert.deepEqual(flow.state().selection, [
+    "src/a.ts",
+    "notes.txt",
+    "junk.log",
+  ]);
 
   const result = await flow.ignoreFile("junk.log");
   assert.equal(result.ok, true);
@@ -5431,7 +6542,11 @@ test("the ignore refresh preserves the attribution notice", async () => {
 
   diffFails = false;
   await flow.ignoreFile("notes.txt");
-  assert.equal(flow.state().notice, warning, "the warning survives the refresh");
+  assert.equal(
+    flow.state().notice,
+    warning,
+    "the warning survives the refresh",
+  );
 
   await cleanup();
 });
@@ -5468,7 +6583,11 @@ test("a late ignore answer never touches a flow that was already closed", async 
   await until(() => flow.state()?.step === "files", "the file list");
 
   const pending = flow.ignoreFile("notes.txt");
-  assert.equal(flow.state().busy, "ignoring the file", "the row is busy while the write runs");
+  assert.equal(
+    flow.state().busy,
+    "ignoring the file",
+    "the row is busy while the write runs",
+  );
   assert.equal(flow.toggle("notes.txt"), false, "a busy flow refuses a toggle");
 
   // The user closes the dialog before the service answers.
@@ -5480,7 +6599,6 @@ test("a late ignore answer never touches a flow that was already closed", async 
 
   await cleanup();
 });
-
 
 // --------------------------------------------------------------------------
 // Settings, visibility and repository detection
@@ -5494,7 +6612,11 @@ test("a hidden button leaves the grid but stays reachable in the palette", async
     route: () => ({ type: "session", sessionID: "s1" }),
   });
   const spawn = createFakeSpawn();
-  const cleanup = await startPlugin(context, view, { spawn, notifyMs: 0, detectTtlMs: 0 });
+  const cleanup = await startPlugin(context, view, {
+    spawn,
+    notifyMs: 0,
+    detectTtlMs: 0,
+  });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
   assert.equal(runtime.setVisible("build-mobile", false), true);
@@ -5513,7 +6635,9 @@ test("a hidden button leaves the grid but stays reachable in the palette", async
   // still be runnable, and its run must still be openable in Show logs.
   const ids = calls.layers[0].commands.map((command) => command.id);
   assert.ok(ids.includes(`${PLUGIN_ID}.build-mobile`));
-  const command = calls.layers[0].commands.find((entry) => entry.id === `${PLUGIN_ID}.build-mobile`);
+  const command = calls.layers[0].commands.find(
+    (entry) => entry.id === `${PLUGIN_ID}.build-mobile`,
+  );
   command.run();
   assert.equal(spawn.calls.length, 1);
   // The run of a hidden action is still the active project's log, because the
@@ -5543,7 +6667,12 @@ test("the plugin controls follow visibility and repository presence", async () =
 
   // scriptsFixture carries a `.git/HEAD`, so the repository controls are drawn.
   const withRepo = runtime.rows("s1");
-  assert.deepEqual(withRepo.controls, { commit: true, push: true, "stop-all": true, log: true });
+  assert.deepEqual(withRepo.controls, {
+    commit: true,
+    push: true,
+    "stop-all": true,
+    log: true,
+  });
   assert.equal(withRepo.canCommit, false, "no service means no commit");
   assert.equal(withRepo.canPush, false, "no service means no push");
 
@@ -5566,8 +6695,14 @@ test("outside a repository the Git controls are hidden, not disabled", async () 
     route: () => ({ type: "session", sessionID: "s1" }),
   });
   const git = {
-    commit: async () => ({ ok: false, error: { code: "unconfirmed", message: "no" } }),
-    push: async () => ({ ok: false, error: { code: "unconfirmed", message: "no" } }),
+    commit: async () => ({
+      ok: false,
+      error: { code: "unconfirmed", message: "no" },
+    }),
+    push: async () => ({
+      ok: false,
+      error: { code: "unconfirmed", message: "no" },
+    }),
   };
   const cleanup = await startPlugin(context, view, {
     spawn: createFakeSpawn(),
@@ -5606,7 +6741,10 @@ test("nested directories resolve to the nearest repository", async () => {
   const cleanup = await startPlugin(context, view, {
     spawn: createFakeSpawn(),
     notifyMs: 0,
-    git: { commit: async () => ({ ok: false }), push: async () => ({ ok: false }) },
+    git: {
+      commit: async () => ({ ok: false }),
+      push: async () => ({ ok: false }),
+    },
     detectTtlMs: 0,
   });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
@@ -5640,7 +6778,11 @@ test("settings list, toggle and persist every button", async () => {
   for (const id of ["commit", "push", "stop-all", "log"]) {
     assert.ok(ids.includes(id), id);
   }
-  assert.ok(items.every((item) => typeof item.label === "string" && item.visible === true));
+  assert.ok(
+    items.every(
+      (item) => typeof item.label === "string" && item.visible === true,
+    ),
+  );
   assert.deepEqual(
     items.map((item) => item.label),
     [...new Set(items.map((item) => item.label))],
@@ -5653,7 +6795,11 @@ test("settings list, toggle and persist every button", async () => {
   });
   assert.equal(runtime.setVisible("build-mobile", false), true);
   assert.equal(notified, 1, "a toggle notifies subscribers");
-  assert.equal(runtime.setVisible("build-mobile", false), false, "a no-op does not notify");
+  assert.equal(
+    runtime.setVisible("build-mobile", false),
+    false,
+    "a no-op does not notify",
+  );
   assert.equal(
     runtime.settingsItems().find((item) => item.id === "build-mobile").visible,
     false,
@@ -5680,10 +6826,17 @@ test("settings list, toggle and persist every button", async () => {
     detectTtlMs: 0,
     visibilityFile,
   });
-  const restarted = second.calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const restarted = second.calls.slots[0].render({ sessionID: "s1" }).props
+    .runtime;
   const afterRestart = restarted.settingsItems();
-  assert.equal(afterRestart.find((item) => item.id === "build-mobile").visible, false);
-  assert.equal(afterRestart.find((item) => item.id === "commit").visible, false);
+  assert.equal(
+    afterRestart.find((item) => item.id === "build-mobile").visible,
+    false,
+  );
+  assert.equal(
+    afterRestart.find((item) => item.id === "commit").visible,
+    false,
+  );
   await cleanupSecond();
 });
 
@@ -5732,7 +6885,11 @@ test("the durable host store carries visibility between TUI instances", async ()
 
   runtime.setVisible("commit", false);
   await Promise.resolve();
-  assert.deepEqual(settings.hidden, ["commit", "push"], "read-modify-write, not a clobber");
+  assert.deepEqual(
+    settings.hidden,
+    ["commit", "push"],
+    "read-modify-write, not a clobber",
+  );
   assert.throws(
     () => readdirSync(path.dirname(visibilityFile)),
     { code: "ENOENT" },
@@ -5761,7 +6918,11 @@ test("show all buttons restores every hidden button and reports the count", asyn
   assert.equal(runtime.showAllButtons(), 2);
   assert.ok(runtime.settingsItems().every((item) => item.visible === true));
   assert.equal(calls.toasts.at(-1).message, "Showing 2 hidden buttons");
-  assert.equal(runtime.showAllButtons(), 0, "a second call has nothing to restore");
+  assert.equal(
+    runtime.showAllButtons(),
+    0,
+    "a second call has nothing to restore",
+  );
 
   await cleanup();
 });
@@ -5781,7 +6942,9 @@ test("the settings entry point opens the dialog with the runtime", async () => {
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
   assert.equal(runtime.openSettings(), true);
-  const shown = calls.dialogs.find((entry) => typeof entry.render === "function");
+  const shown = calls.dialogs.find(
+    (entry) => typeof entry.render === "function",
+  );
   assert.ok(shown, "the dialog is mounted");
   const element = shown.render();
   assert.equal(element.kind, "settings");
@@ -5790,8 +6953,12 @@ test("the settings entry point opens the dialog with the runtime", async () => {
 
   // The palette exposes the same entry point, plus Show all buttons.
   const commands = calls.layers[0].commands;
-  const settingsCommand = commands.find((command) => command.id === `${PLUGIN_ID}.settings`);
-  const showAllCommand = commands.find((command) => command.id === `${PLUGIN_ID}.show-all`);
+  const settingsCommand = commands.find(
+    (command) => command.id === `${PLUGIN_ID}.settings`,
+  );
+  const showAllCommand = commands.find(
+    (command) => command.id === `${PLUGIN_ID}.show-all`,
+  );
   assert.ok(settingsCommand);
   assert.ok(showAllCommand);
 
@@ -5813,7 +6980,10 @@ test("the settings entry point opens the dialog with the runtime", async () => {
   context.ui.dialog = {};
   calls.toasts.length = 0;
   assert.equal(runtime.openSettings(), false);
-  assert.match(calls.toasts.at(-1).message, /Settings dialog is unavailable in this host/);
+  assert.match(
+    calls.toasts.at(-1).message,
+    /Settings dialog is unavailable in this host/,
+  );
   assert.doesNotMatch(calls.toasts.at(-1).message, /palette/);
 
   await cleanup();
@@ -5829,9 +6999,13 @@ test("the settings entry point opens the dialog with the runtime", async () => {
     { Sidebar: view.Sidebar },
     { spawn: createFakeSpawn(), notifyMs: 0, detectTtlMs: 0 },
   );
-  const bareRuntime = bare.calls.slots[0].render({ sessionID: "s1" }).props.runtime;
+  const bareRuntime = bare.calls.slots[0].render({ sessionID: "s1" }).props
+    .runtime;
   assert.equal(bareRuntime.openSettings(), false);
-  assert.match(bare.calls.toasts.at(-1).message, /Settings dialog is unavailable in this host/);
+  assert.match(
+    bare.calls.toasts.at(-1).message,
+    /Settings dialog is unavailable in this host/,
+  );
   await bareCleanup();
 });
 
@@ -5883,7 +7057,10 @@ test("openSettings falls back across dialog APIs and never fakes success", async
   };
   assert.equal(runtime.openSettings(), false);
   assert.equal(calls.dialogs.length, 0, "nothing was opened");
-  assert.match(calls.toasts.at(-1).message, /Settings dialog is unavailable in this host/);
+  assert.match(
+    calls.toasts.at(-1).message,
+    /Settings dialog is unavailable in this host/,
+  );
 
   // A host that cannot resize still has an open dialog: success, no toast, and
   // no second dialog.
@@ -5954,10 +7131,17 @@ test("the palette follows the active session's project", async () => {
   const layer = calls.layers.at(-1);
   const before = calls.layers.length;
   const firstIds = layer.commands.map((command) => command.id);
-  assert.ok(firstIds.includes(`${PLUGIN_ID}.web-live`), "the first project's actions are listed");
+  assert.ok(
+    firstIds.includes(`${PLUGIN_ID}.web-live`),
+    "the first project's actions are listed",
+  );
 
   runtime.rows("s1");
-  assert.equal(calls.layers.length, before, "an unchanged directory keeps one layer");
+  assert.equal(
+    calls.layers.length,
+    before,
+    "an unchanged directory keeps one layer",
+  );
   assert.deepEqual(
     layer.commands.map((command) => command.id),
     firstIds,
@@ -5968,12 +7152,20 @@ test("the palette follows the active session's project", async () => {
   // mutates what it got cannot corrupt the next read.
   const scratch = layer.commands;
   scratch.length = 0;
-  assert.deepEqual(layer.commands.map((command) => command.id), firstIds, "reads are independent");
+  assert.deepEqual(
+    layer.commands.map((command) => command.id),
+    firstIds,
+    "reads are independent",
+  );
 
   // The host reads the layer through its factory, which only describes the
   // active session's project - so the palette follows the session switch.
   session = "s2";
-  assert.equal(calls.layers.length, before, "the layer is not re-registered on a switch");
+  assert.equal(
+    calls.layers.length,
+    before,
+    "the layer is not re-registered on a switch",
+  );
   const commands = layer.commands.map((command) => command.id);
   assert.ok(commands.includes(`${PLUGIN_ID}.build-mobile`));
   assert.equal(
@@ -6026,7 +7218,11 @@ test("palette ids stay safe and unique for discovered script actions", async () 
     (candidate) => candidate.title === `Launchpad: ${scripted.title}`,
   );
   assert.ok(command, "the script action is listed in the palette");
-  assert.notEqual(command.id, `${PLUGIN_ID}.${scripted.id}`, "the raw id is not reused");
+  assert.notEqual(
+    command.id,
+    `${PLUGIN_ID}.${scripted.id}`,
+    "the raw id is not reused",
+  );
 
   // The closure still holds the real id, so the palette runs the exact script.
   command.run();
@@ -6050,13 +7246,20 @@ test("a directory named .git without Git metadata is not offered Git controls", 
   const cleanup = await startPlugin(context, view, {
     spawn: createFakeSpawn(),
     notifyMs: 0,
-    git: { commit: async () => ({ ok: false }), push: async () => ({ ok: false }) },
+    git: {
+      commit: async () => ({ ok: false }),
+      push: async () => ({ ok: false }),
+    },
     detectTtlMs: 0,
   });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
   const rows = runtime.rows("s1");
-  assert.equal(rows.controls.commit, false, "an empty .git is not a repository");
+  assert.equal(
+    rows.controls.commit,
+    false,
+    "an empty .git is not a repository",
+  );
   assert.equal(rows.controls.push, false);
   assert.equal(rows.canCommit, false);
   assert.equal(rows.canPush, false);
@@ -6077,7 +7280,9 @@ test("a failed settings save is reported instead of silently lost", async () => 
     store: () => [
       settings,
       async () => {
-        throw Object.assign(new Error("EROFS: read-only file system"), { code: "EROFS" });
+        throw Object.assign(new Error("EROFS: read-only file system"), {
+          code: "EROFS",
+        });
       },
     ],
   };
@@ -6088,14 +7293,26 @@ test("a failed settings save is reported instead of silently lost", async () => 
   });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
-  assert.equal(runtime.settingsError(), null, "a healthy store reports no error");
+  assert.equal(
+    runtime.settingsError(),
+    null,
+    "a healthy store reports no error",
+  );
   assert.equal(runtime.setVisible("log", false), true);
-  assert.equal(runtime.rows("s1").controls.log, false, "the click still applies immediately");
+  assert.equal(
+    runtime.rows("s1").controls.log,
+    false,
+    "the click still applies immediately",
+  );
   assert.equal(runtime.settingsError(), null, "the host has not answered yet");
 
   await Promise.resolve();
   await Promise.resolve();
-  assert.equal(runtime.settingsError().code, "save-failed", "the failure is exposed to the UI");
+  assert.equal(
+    runtime.settingsError().code,
+    "save-failed",
+    "the failure is exposed to the UI",
+  );
   const toast = calls.toasts.at(-1);
   assert.equal(toast.variant, "warning");
   assert.match(toast.message, /Settings not saved/);
@@ -6107,7 +7324,11 @@ test("a failed settings save is reported instead of silently lost", async () => 
   runtime.setVisible("commit", false);
   await Promise.resolve();
   await Promise.resolve();
-  assert.equal(calls.toasts.length, before, "a repeated failure is not re-toasted");
+  assert.equal(
+    calls.toasts.length,
+    before,
+    "a repeated failure is not re-toasted",
+  );
 
   await cleanup();
 });
@@ -6136,7 +7357,11 @@ test("hiddenCount counts buttons hidden in any project, not just the active one"
   // visibility is keyed by stable action id, and Show all restores them all.
   session = "s2";
   assert.equal(runtime.setVisible("cargo-fmt", false), true);
-  assert.equal(runtime.hiddenCount(), 2, "an id hidden in another project still counts");
+  assert.equal(
+    runtime.hiddenCount(),
+    2,
+    "an id hidden in another project still counts",
+  );
   assert.equal(
     runtime.rows("s2").items.some((item) => item.action.id === "cargo-fmt"),
     false,
@@ -6148,13 +7373,21 @@ test("hiddenCount counts buttons hidden in any project, not just the active one"
     false,
     "the first project's hiding still applies",
   );
-  assert.equal(runtime.hiddenCount(), 2, "a session switch does not change the count");
+  assert.equal(
+    runtime.hiddenCount(),
+    2,
+    "a session switch does not change the count",
+  );
 
   assert.equal(runtime.showAllButtons(), 2, "Show all restores both projects");
   assert.equal(runtime.hiddenCount(), 0);
-  assert.ok(runtime.rows("s1").items.some((item) => item.action.id === "build-mobile"));
+  assert.ok(
+    runtime.rows("s1").items.some((item) => item.action.id === "build-mobile"),
+  );
   session = "s2";
-  assert.ok(runtime.rows("s2").items.some((item) => item.action.id === "cargo-fmt"));
+  assert.ok(
+    runtime.rows("s2").items.some((item) => item.action.id === "cargo-fmt"),
+  );
 
   await cleanup();
 });
@@ -6165,7 +7398,14 @@ test("hiddenCount counts buttons hidden in any project, not just the active one"
 
 // A Rust project with no package.json: cargo is the whole project. The spawn is
 // always a fake, so no cargo binary is ever needed or run.
-const CARGO_IDS = ["cargo-build", "cargo-run", "cargo-test", "cargo-check", "cargo-clippy", "cargo-fmt"];
+const CARGO_IDS = [
+  "cargo-build",
+  "cargo-run",
+  "cargo-test",
+  "cargo-check",
+  "cargo-clippy",
+  "cargo-fmt",
+];
 const CARGO_LABELS = [
   "Cargo build",
   "Cargo run",
@@ -6178,7 +7418,7 @@ const CARGO_LABELS = [
 function cargoFixture(files = {}) {
   return fixture({
     ".git/HEAD": "ref: refs/heads/main\n",
-    "Cargo.toml": "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    "Cargo.toml": '[package]\nname = "demo"\nversion = "0.1.0"\n',
     "Cargo.lock": "version = 3\n",
     "src/main.rs": "fn main() {}\n",
     ...files,
@@ -6229,7 +7469,11 @@ test("cargo buttons launch cargo with fixed arguments in the manifest's folder",
     route: () => ({ type: "session", sessionID: "s1" }),
   });
   const spawn = createFakeSpawn();
-  const cleanup = await startPlugin(context, view, { spawn, notifyMs: 0, detectTtlMs: 0 });
+  const cleanup = await startPlugin(context, view, {
+    spawn,
+    notifyMs: 0,
+    detectTtlMs: 0,
+  });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
   const started = runtime.startAction("cargo-test");
@@ -6243,7 +7487,11 @@ test("cargo buttons launch cargo with fixed arguments in the manifest's folder",
 
   const fmt = runtime.startAction("cargo-fmt");
   assert.equal(fmt.ok, true);
-  assert.deepEqual(spawn.calls[1].args, ["fmt", "--check"], "fmt is format-checking, not rewriting");
+  assert.deepEqual(
+    spawn.calls[1].args,
+    ["fmt", "--check"],
+    "fmt is format-checking, not rewriting",
+  );
   assert.equal(spawn.calls[1].options.cwd, root);
 
   // A library-only manifest is not second-guessed: `cargo run` still runs and
@@ -6257,8 +7505,8 @@ test("cargo buttons launch cargo with fixed arguments in the manifest's folder",
 
 test("a nested crate runs cargo in the crate's own folder, not the workspace root", async () => {
   const root = cargoFixture({
-    "Cargo.toml": "[workspace]\nmembers = [\"crates/inner\"]\n",
-    "crates/inner/Cargo.toml": "[package]\nname = \"inner\"\nversion = \"0.1.0\"\n",
+    "Cargo.toml": '[workspace]\nmembers = ["crates/inner"]\n',
+    "crates/inner/Cargo.toml": '[package]\nname = "inner"\nversion = "0.1.0"\n',
     "crates/inner/src/lib.rs": "pub fn inner() {}\n",
   });
   const crate = path.join(root, "crates", "inner");
@@ -6268,13 +7516,21 @@ test("a nested crate runs cargo in the crate's own folder, not the workspace roo
     route: () => ({ type: "session", sessionID: "s1" }),
   });
   const spawn = createFakeSpawn();
-  const cleanup = await startPlugin(context, view, { spawn, notifyMs: 0, detectTtlMs: 0 });
+  const cleanup = await startPlugin(context, view, {
+    spawn,
+    notifyMs: 0,
+    detectTtlMs: 0,
+  });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
   assert.equal(runtime.rows("s1").items.at(0).resolution.cwd, crate);
   const started = runtime.startAction("cargo-test");
   assert.equal(started.ok, true);
-  assert.equal(spawn.calls[0].options.cwd, crate, "the nearest manifest owns the cwd");
+  assert.equal(
+    spawn.calls[0].options.cwd,
+    crate,
+    "the nearest manifest owns the cwd",
+  );
 
   await cleanup();
 });
@@ -6287,15 +7543,29 @@ test("a hidden Cargo button stays in the palette and its run stays trackable", a
     route: () => ({ type: "session", sessionID: "s1" }),
   });
   const spawn = createFakeSpawn();
-  const cleanup = await startPlugin(context, view, { spawn, notifyMs: 0, detectTtlMs: 0 });
+  const cleanup = await startPlugin(context, view, {
+    spawn,
+    notifyMs: 0,
+    detectTtlMs: 0,
+  });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
   assert.equal(runtime.setVisible("cargo-test", false), true);
   const rows = runtime.rows("s1");
-  assert.equal(rows.items.some((item) => item.action.id === "cargo-test"), false, "no row is drawn");
-  assert.equal(rows.items.length, CARGO_IDS.length - 1, "the other cargo rows are untouched");
+  assert.equal(
+    rows.items.some((item) => item.action.id === "cargo-test"),
+    false,
+    "no row is drawn",
+  );
+  assert.equal(
+    rows.items.length,
+    CARGO_IDS.length - 1,
+    "the other cargo rows are untouched",
+  );
 
-  const command = calls.layers[0].commands.find((entry) => entry.id === `${PLUGIN_ID}.cargo-test`);
+  const command = calls.layers[0].commands.find(
+    (entry) => entry.id === `${PLUGIN_ID}.cargo-test`,
+  );
   assert.ok(command, "hiding a button never removes it from the palette");
   command.run();
   assert.equal(spawn.calls.length, 1);
@@ -6325,27 +7595,51 @@ test("the button editor exposes one shape for every editable button", async () =
     sessions: { s1: { directory: root } },
     route: () => ({ type: "session", sessionID: "s1" }),
   });
-  const cleanup = await startPlugin(context, view, { spawn: createFakeSpawn(), notifyMs: 0 });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+  });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
-  for (const name of ["buttonEditorItems", "saveButton", "resetButton", "deleteButton", "buttonConfigError"]) {
+  for (const name of [
+    "buttonEditorItems",
+    "saveButton",
+    "resetButton",
+    "deleteButton",
+    "buttonConfigError",
+  ]) {
     assert.equal(typeof runtime[name], "function", name);
   }
   assert.equal(runtime.buttonConfigError(), null);
 
   const items = runtime.buttonEditorItems();
   const build = items.find((item) => item.id === "build-mobile");
-  assert.deepEqual(Object.keys(build).sort(), ["args", "command", "custom", "cwd", "id", "label", "overridden"]);
+  assert.deepEqual(Object.keys(build).sort(), [
+    "args",
+    "command",
+    "custom",
+    "cwd",
+    "id",
+    "label",
+    "overridden",
+  ]);
   assert.equal(build.custom, false);
   assert.equal(build.overridden, false);
   assert.equal(build.label, "Build");
   assert.equal(build.cwd, root, "the working directory is the action's own");
-  assert.ok(build.args.length > 0, "the arguments of the button are shown as they run");
+  assert.ok(
+    build.args.length > 0,
+    "the arguments of the button are shown as they run",
+  );
 
   // The four plugin controls have no command behind them, so they are not rows
   // of the editor.
   for (const id of ["commit", "push", "stop-all", "log"]) {
-    assert.equal(items.some((item) => item.id === id), false, id);
+    assert.equal(
+      items.some((item) => item.id === id),
+      false,
+      id,
+    );
   }
 
   await cleanup();
@@ -6362,7 +7656,9 @@ test("a saved command replaces exactly what the button runs", async () => {
   const cleanup = await startPlugin(context, view, { spawn, notifyMs: 0 });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
-  const before = runtime.rows("s1").items.find((item) => item.action.id === "mobile-live");
+  const before = runtime
+    .rows("s1")
+    .items.find((item) => item.action.id === "mobile-live");
   const saved = runtime.saveButton({
     id: "build-mobile",
     label: "Ship it",
@@ -6374,15 +7670,33 @@ test("a saved command replaces exactly what the button runs", async () => {
 
   const rows = runtime.rows("s1");
   const build = rows.items.find((item) => item.action.id === "build-mobile");
-  assert.equal(build.action.label, "Ship it", "the sidebar uses the saved name");
+  assert.equal(
+    build.action.label,
+    "Ship it",
+    "the sidebar uses the saved name",
+  );
   assert.equal(build.resolution.command, "bash");
   assert.deepEqual(build.resolution.args, ["scripts/deploy.sh", "--release"]);
-  assert.equal(build.resolution.cwd, root, "the project directory is preserved");
+  assert.equal(
+    build.resolution.cwd,
+    root,
+    "the project directory is preserved",
+  );
   assert.equal(build.resolution.display, "bash scripts/deploy.sh --release");
-  assert.deepEqual(build.resolution.env, {}, "the action's own environment is not injected");
-  assert.equal(build.resolution.stdin, false, "an arbitrary command never takes live input");
+  assert.deepEqual(
+    build.resolution.env,
+    {},
+    "the action's own environment is not injected",
+  );
+  assert.equal(
+    build.resolution.stdin,
+    false,
+    "an arbitrary command never takes live input",
+  );
 
-  const editor = runtime.buttonEditorItems().find((item) => item.id === "build-mobile");
+  const editor = runtime
+    .buttonEditorItems()
+    .find((item) => item.id === "build-mobile");
   assert.equal(editor.overridden, true);
   assert.equal(editor.label, "Ship it");
   assert.deepEqual(editor.args, ["scripts/deploy.sh", "--release"]);
@@ -6390,9 +7704,13 @@ test("a saved command replaces exactly what the button runs", async () => {
 
   // A button the user did not touch is unchanged, and the palette follows the
   // saved name too.
-  const after = runtime.rows("s1").items.find((item) => item.action.id === "mobile-live");
+  const after = runtime
+    .rows("s1")
+    .items.find((item) => item.action.id === "mobile-live");
   assert.deepEqual(after.resolution, before.resolution);
-  const command = calls.layers.at(-1).commands.find((entry) => entry.id === `${PLUGIN_ID}.build-mobile`);
+  const command = calls.layers
+    .at(-1)
+    .commands.find((entry) => entry.id === `${PLUGIN_ID}.build-mobile`);
   assert.equal(command.title, "Launchpad: Ship it");
 
   // A click runs the saved command, not the discovered one.
@@ -6400,7 +7718,11 @@ test("a saved command replaces exactly what the button runs", async () => {
   assert.equal(spawn.calls[0].command, "bash");
   assert.deepEqual(spawn.calls[0].args, ["scripts/deploy.sh", "--release"]);
   assert.equal(spawn.calls[0].options.cwd, root);
-  assert.equal(spawn.calls[0].options.shell, false, "a saved command is never run through a shell");
+  assert.equal(
+    spawn.calls[0].options.shell,
+    false,
+    "a saved command is never run through a shell",
+  );
 
   await cleanup();
 });
@@ -6421,19 +7743,34 @@ test("a renamed button keeps its id, its run and its hidden state", async () => 
   assert.equal(started.key, key);
   assert.equal(runtime.setVisible("build-mobile", false), true);
 
-  assert.deepEqual(runtime.saveButton({ id: "build-mobile", label: "Renamed", command: "bash", args: [] }), {
-    ok: true,
-    id: "build-mobile",
-  });
+  assert.deepEqual(
+    runtime.saveButton({
+      id: "build-mobile",
+      label: "Renamed",
+      command: "bash",
+      args: [],
+    }),
+    {
+      ok: true,
+      id: "build-mobile",
+    },
+  );
 
   // The rename does not resurrect a hidden button...
-  assert.equal(runtime.rows("s1").items.some((item) => item.action.id === "build-mobile"), false);
+  assert.equal(
+    runtime.rows("s1").items.some((item) => item.action.id === "build-mobile"),
+    false,
+  );
   // ...and the settings list shows the new name, still hidden.
-  const listed = runtime.settingsItems().find((item) => item.id === "build-mobile");
+  const listed = runtime
+    .settingsItems()
+    .find((item) => item.id === "build-mobile");
   assert.equal(listed.label, "Renamed");
   assert.equal(listed.visible, false);
   // ...and the palette still offers it under the new name.
-  const command = calls.layers.at(-1).commands.find((entry) => entry.id === `${PLUGIN_ID}.build-mobile`);
+  const command = calls.layers
+    .at(-1)
+    .commands.find((entry) => entry.id === `${PLUGIN_ID}.build-mobile`);
   assert.equal(command.title, "Launchpad: Renamed");
 
   // The run keeps its identity: same key, same log, still stoppable.
@@ -6463,20 +7800,32 @@ test("a hand-added button runs from the project it was added in", async () => {
   const cleanup = await startPlugin(context, view, { spawn, notifyMs: 0 });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
-  const added = runtime.saveButton({ label: "Deploy", command: "bash", args: ["scripts/ship.sh"] });
+  const added = runtime.saveButton({
+    label: "Deploy",
+    command: "bash",
+    args: ["scripts/ship.sh"],
+  });
   assert.equal(added.ok, true);
   assert.match(added.id, /^custom:/, "a new button gets its own stable id");
   assert.equal(spawn.calls.length, 0, "adding a button runs nothing");
 
-  const mine = runtime.rows("s1").items.find((item) => item.action.id === added.id);
+  const mine = runtime
+    .rows("s1")
+    .items.find((item) => item.action.id === added.id);
   assert.equal(mine.action.label, "Deploy");
-  assert.equal(mine.resolution.cwd, first, "it runs from the project it belongs to");
+  assert.equal(
+    mine.resolution.cwd,
+    first,
+    "it runs from the project it belongs to",
+  );
   assert.deepEqual(mine.resolution.env, {});
   assert.equal(mine.resolution.stdin, false);
   assert.ok(
     calls.layers
       .at(-1)
-      .commands.some((command) => command.id.startsWith(`${PLUGIN_ID}.custom-`)),
+      .commands.some((command) =>
+        command.id.startsWith(`${PLUGIN_ID}.custom-`),
+      ),
     "and it is offered in the palette",
   );
 
@@ -6487,17 +7836,32 @@ test("a hand-added button runs from the project it was added in", async () => {
 
   // Another project never sees it, anywhere.
   session = "s2";
-  assert.equal(runtime.rows("s2").items.some((item) => item.action.id === added.id), false);
-  assert.equal(runtime.buttonEditorItems().some((item) => item.id === added.id), false);
-  assert.equal(runtime.settingsItems().some((item) => item.id === added.id), false);
   assert.equal(
-    calls.layers.at(-1).commands.some((command) => command.title === "Launchpad: Deploy"),
+    runtime.rows("s2").items.some((item) => item.action.id === added.id),
+    false,
+  );
+  assert.equal(
+    runtime.buttonEditorItems().some((item) => item.id === added.id),
+    false,
+  );
+  assert.equal(
+    runtime.settingsItems().some((item) => item.id === added.id),
+    false,
+  );
+  assert.equal(
+    calls.layers
+      .at(-1)
+      .commands.some((command) => command.title === "Launchpad: Deploy"),
     false,
     "and its palette entry follows the active project",
   );
 
   session = "s1";
-  assert.equal(runtime.rows("s1").items.some((item) => item.action.id === added.id), true, "back in its project");
+  assert.equal(
+    runtime.rows("s1").items.some((item) => item.action.id === added.id),
+    true,
+    "back in its project",
+  );
 
   await cleanup();
 });
@@ -6513,9 +7877,23 @@ test("editing and deleting never run anything", async () => {
   const cleanup = await startPlugin(context, view, { spawn, notifyMs: 0 });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
-  const added = runtime.saveButton({ label: "Deploy", command: "bash", args: [] });
-  runtime.saveButton({ id: added.id, label: "Deploy again", command: "bash", args: ["-x"] });
-  runtime.saveButton({ id: "build-mobile", label: "Ship it", command: "bash", args: [] });
+  const added = runtime.saveButton({
+    label: "Deploy",
+    command: "bash",
+    args: [],
+  });
+  runtime.saveButton({
+    id: added.id,
+    label: "Deploy again",
+    command: "bash",
+    args: ["-x"],
+  });
+  runtime.saveButton({
+    id: "build-mobile",
+    label: "Ship it",
+    command: "bash",
+    args: [],
+  });
   runtime.resetButton("build-mobile");
   runtime.deleteButton(added.id);
   runtime.buttonEditorItems();
@@ -6534,37 +7912,73 @@ test("a refused edit explains itself and stores nothing", async () => {
     sessions: { s1: { directory: root } },
     route: () => ({ type: "session", sessionID: "s1" }),
   });
-  const cleanup = await startPlugin(context, view, { spawn: createFakeSpawn(), notifyMs: 0 });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+  });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
-  const nameless = runtime.saveButton({ label: "  ", command: "bash", args: [] });
+  const nameless = runtime.saveButton({
+    label: "  ",
+    command: "bash",
+    args: [],
+  });
   assert.equal(nameless.ok, false);
   assert.equal(nameless.code, "invalid-label");
   assert.ok(nameless.reason.length > 0);
 
-  const noCommand = runtime.saveButton({ label: "Deploy", command: "", args: [] });
+  const noCommand = runtime.saveButton({
+    label: "Deploy",
+    command: "",
+    args: [],
+  });
   assert.equal(noCommand.code, "invalid-command");
 
-  const badArgs = runtime.saveButton({ label: "Deploy", command: "bash", args: "ship.sh" });
+  const badArgs = runtime.saveButton({
+    label: "Deploy",
+    command: "bash",
+    args: "ship.sh",
+  });
   assert.equal(badArgs.code, "invalid-args");
-  const nulArg = runtime.saveButton({ label: "Deploy", command: "bash", args: ["a\u0000b"] });
+  const nulArg = runtime.saveButton({
+    label: "Deploy",
+    command: "bash",
+    args: ["a\u0000b"],
+  });
   assert.equal(nulArg.code, "invalid-args");
 
   // The plugin's own controls are not editable, not resettable and not
   // deletable, and an unknown id cannot be overridden.
-  assert.equal(runtime.saveButton({ id: "commit", label: "x", command: "y", args: [] }).code, "control-locked");
+  assert.equal(
+    runtime.saveButton({ id: "commit", label: "x", command: "y", args: [] })
+      .code,
+    "control-locked",
+  );
   assert.equal(runtime.resetButton("commit").code, "control-locked");
   assert.equal(runtime.deleteButton("log").code, "control-locked");
-  assert.equal(runtime.saveButton({ id: "no-such-button", label: "x", command: "y", args: [] }).code, "unknown-action");
+  assert.equal(
+    runtime.saveButton({
+      id: "no-such-button",
+      label: "x",
+      command: "y",
+      args: [],
+    }).code,
+    "unknown-action",
+  );
   assert.equal(runtime.deleteButton("build-mobile").code, "not-custom");
   assert.equal(runtime.resetButton("no-such-button").code, "unknown-action");
 
   // A refused edit leaves the button exactly as it was.
-  const build = runtime.buttonEditorItems().find((item) => item.id === "build-mobile");
+  const build = runtime
+    .buttonEditorItems()
+    .find((item) => item.id === "build-mobile");
   assert.equal(build.label, "Build");
   assert.equal(build.overridden, false);
   assert.equal(
-    calls.layers.at(-1).commands.find((command) => command.id === `${PLUGIN_ID}.build-mobile`).title,
+    calls.layers
+      .at(-1)
+      .commands.find((command) => command.id === `${PLUGIN_ID}.build-mobile`)
+      .title,
     "Launchpad: Build mobile (vet-build)",
     "the palette is unchanged too",
   );
@@ -6583,7 +7997,11 @@ test("deleting a running button keeps its log and its stop target", async () => 
   const cleanup = await startPlugin(context, view, { spawn, notifyMs: 0 });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
-  const added = runtime.saveButton({ label: "Deploy", command: "bash", args: ["scripts/ship.sh"] });
+  const added = runtime.saveButton({
+    label: "Deploy",
+    command: "bash",
+    args: ["scripts/ship.sh"],
+  });
   const started = runtime.startAction(added.id);
   assert.equal(runtime.snapshot(started.key).running, true);
   // A host-held palette entry for the button, captured while it exists.
@@ -6593,8 +8011,15 @@ test("deleting a running button keeps its log and its stop target", async () => 
   assert.ok(staleEntry, "the palette offered the button before it was deleted");
 
   assert.deepEqual(runtime.deleteButton(added.id), { ok: true, id: added.id });
-  assert.equal(runtime.rows("s1").items.some((item) => item.action.id === added.id), false, "the button is gone");
-  assert.equal(runtime.buttonEditorItems().some((item) => item.id === added.id), false);
+  assert.equal(
+    runtime.rows("s1").items.some((item) => item.action.id === added.id),
+    false,
+    "the button is gone",
+  );
+  assert.equal(
+    runtime.buttonEditorItems().some((item) => item.id === added.id),
+    false,
+  );
 
   // The run it already started is still this project's: openable and stoppable,
   // even though the button itself is gone.
@@ -6630,8 +8055,17 @@ test("saved commands are read back by the next run of the plugin", async () => {
     buttonConfigFile,
   });
   const before = first.calls.slots[0].render({ sessionID: "s1" }).props.runtime;
-  const added = before.saveButton({ label: "Deploy", command: "bash", args: ["ship.sh"] });
-  before.saveButton({ id: "build-mobile", label: "Ship it", command: "bash", args: [] });
+  const added = before.saveButton({
+    label: "Deploy",
+    command: "bash",
+    args: ["ship.sh"],
+  });
+  before.saveButton({
+    id: "build-mobile",
+    label: "Ship it",
+    command: "bash",
+    args: [],
+  });
   await cleanupFirst();
 
   const second = createContext({
@@ -6644,9 +8078,17 @@ test("saved commands are read back by the next run of the plugin", async () => {
     notifyMs: 0,
     buttonConfigFile,
   });
-  const runtime = second.calls.slots[0].render({ sessionID: "s1" }).props.runtime;
-  assert.equal(runtime.rows("s1").items.find((item) => item.action.id === "build-mobile").action.label, "Ship it");
-  assert.equal(runtime.rows("s1").items.some((item) => item.action.id === added.id), true);
+  const runtime = second.calls.slots[0].render({ sessionID: "s1" }).props
+    .runtime;
+  assert.equal(
+    runtime.rows("s1").items.find((item) => item.action.id === "build-mobile")
+      .action.label,
+    "Ship it",
+  );
+  assert.equal(
+    runtime.rows("s1").items.some((item) => item.action.id === added.id),
+    true,
+  );
   assert.equal(runtime.buttonConfigError(), null);
 
   await cleanupSecond();
@@ -6659,14 +8101,25 @@ test("a settings subscriber hears a button edit, not only a visibility toggle", 
     sessions: { s1: { directory: root } },
     route: () => ({ type: "session", sessionID: "s1" }),
   });
-  const cleanup = await startPlugin(context, view, { spawn: createFakeSpawn(), notifyMs: 0 });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+  });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
   const seen = [];
   const off = runtime.subscribeSettings((reason) => seen.push(reason));
-  runtime.saveButton({ id: "build-mobile", label: "Ship it", command: "bash", args: [] });
+  runtime.saveButton({
+    id: "build-mobile",
+    label: "Ship it",
+    command: "bash",
+    args: [],
+  });
   runtime.setVisible("build-mobile", false);
-  assert.ok(seen.length >= 2, "a label edit and a visibility change both notify");
+  assert.ok(
+    seen.length >= 2,
+    "a label edit and a visibility change both notify",
+  );
   const count = seen.length;
   off();
   runtime.setVisible("build-mobile", true);
@@ -6685,7 +8138,9 @@ test("a button that cannot be saved is reported, and the edit stays visible", as
     readFileSync,
     renameSync,
     writeFileSync() {
-      const error = new Error("EROFS: read-only file system, open 'buttons.json'");
+      const error = new Error(
+        "EROFS: read-only file system, open 'buttons.json'",
+      );
       error.code = "EROFS";
       throw error;
     },
@@ -6703,14 +8158,31 @@ test("a button that cannot be saved is reported, and the edit stays visible", as
   });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
-  const saved = runtime.saveButton({ id: "build-mobile", label: "Ship it", command: "bash", args: [] });
-  assert.deepEqual(saved, { ok: true, id: "build-mobile" }, "the click is not silently dropped");
-  assert.notEqual(runtime.buttonConfigError(), null, "the failure is queryable");
+  const saved = runtime.saveButton({
+    id: "build-mobile",
+    label: "Ship it",
+    command: "bash",
+    args: [],
+  });
+  assert.deepEqual(
+    saved,
+    { ok: true, id: "build-mobile" },
+    "the click is not silently dropped",
+  );
+  assert.notEqual(
+    runtime.buttonConfigError(),
+    null,
+    "the failure is queryable",
+  );
   assert.equal(runtime.buttonConfigError().code, "save-failed");
   assert.match(calls.toasts.at(-1).message, /Settings not saved:/);
   assert.equal(calls.toasts.at(-1).variant, "warning");
   // The button still shows what the user asked for, so nothing looks lost.
-  assert.equal(runtime.rows("s1").items.find((item) => item.action.id === "build-mobile").action.label, "Ship it");
+  assert.equal(
+    runtime.rows("s1").items.find((item) => item.action.id === "build-mobile")
+      .action.label,
+    "Ship it",
+  );
 
   await cleanup();
 });
@@ -6731,11 +8203,24 @@ test("an unreadable button config is reported as a read failure, not as a saved 
   });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
-  const saved = runtime.saveButton({ id: "build-mobile", label: "Ship it", command: "bash", args: [] });
+  const saved = runtime.saveButton({
+    id: "build-mobile",
+    label: "Ship it",
+    command: "bash",
+    args: [],
+  });
   assert.equal(saved.ok, true, "the edit is kept locally");
-  assert.equal(runtime.buttonConfigError().code, "read-failed", "the real cause is reported");
+  assert.equal(
+    runtime.buttonConfigError().code,
+    "read-failed",
+    "the real cause is reported",
+  );
   assert.match(calls.toasts.at(-1).message, /Settings not saved:/);
-  assert.equal(runtime.rows("s1").items.find((item) => item.action.id === "build-mobile").action.label, "Ship it");
+  assert.equal(
+    runtime.rows("s1").items.find((item) => item.action.id === "build-mobile")
+      .action.label,
+    "Ship it",
+  );
 
   await cleanup();
 });
@@ -6758,13 +8243,28 @@ test("the durable host store is preferred over the config file", async () => {
     route: () => ({ type: "session", sessionID: "s1" }),
   });
   context.storage = storage;
-  const cleanup = await startPlugin(context, view, { spawn: createFakeSpawn(), notifyMs: 0 });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+  });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
-  runtime.saveButton({ id: "build-mobile", label: "Ship it", command: "bash", args: [] });
+  runtime.saveButton({
+    id: "build-mobile",
+    label: "Ship it",
+    command: "bash",
+    args: [],
+  });
   const keys = stored.map((entry) => entry[0]);
-  assert.equal(keys.filter((key) => key === "control.buttons").length, 1, "the buttons document is stored once");
-  assert.equal(settings.projects[root].overrides["build-mobile"].label, "Ship it");
+  assert.equal(
+    keys.filter((key) => key === "control.buttons").length,
+    1,
+    "the buttons document is stored once",
+  );
+  assert.equal(
+    settings.projects[root].overrides["build-mobile"].label,
+    "Ship it",
+  );
 
   await cleanup();
 });
@@ -6787,8 +8287,16 @@ test("an edit prepared in one project cannot be written into the one that replac
   // The dialog opens in the first project and captures it.
   const captured = runtime.buttonProject();
   assert.equal(captured, first, "the capture is the project key");
-  const mine = runtime.saveButton({ label: "Deploy", command: "bash", args: ["ship.sh"] });
-  assert.equal(mine.ok, true, "and it can be used while that project is active");
+  const mine = runtime.saveButton({
+    label: "Deploy",
+    command: "bash",
+    args: ["ship.sh"],
+  });
+  assert.equal(
+    mine.ok,
+    true,
+    "and it can be used while that project is active",
+  );
 
   // The user switches to another project while the dialog is still open.
   session = "s2";
@@ -6796,56 +8304,119 @@ test("an edit prepared in one project cannot be written into the one that replac
   const spawns = spawn.calls.length;
   const toasts = calls.toasts.length;
 
-  const stale = { ok: false, code: "project-changed", reason: "Project changed. Reopen the button editor." };
+  const stale = {
+    ok: false,
+    code: "project-changed",
+    reason: "Project changed. Reopen the button editor.",
+  };
   assert.deepEqual(
-    runtime.saveButton({ id: "build-mobile", label: "Ship it", command: "bash", args: [], project: captured }),
+    runtime.saveButton({
+      id: "build-mobile",
+      label: "Ship it",
+      command: "bash",
+      args: [],
+      project: captured,
+    }),
     stale,
     "an override is refused",
   );
   assert.deepEqual(
-    runtime.saveButton({ label: "Added", command: "bash", args: [], project: captured }),
+    runtime.saveButton({
+      label: "Added",
+      command: "bash",
+      args: [],
+      project: captured,
+    }),
     stale,
     "a hand-added button is refused too",
   );
-  assert.deepEqual(runtime.resetButton("build-mobile", captured), stale, "a reset is refused");
-  assert.deepEqual(runtime.deleteButton(mine.id, captured), stale, "a delete is refused");
+  assert.deepEqual(
+    runtime.resetButton("build-mobile", captured),
+    stale,
+    "a reset is refused",
+  );
+  assert.deepEqual(
+    runtime.deleteButton(mine.id, captured),
+    stale,
+    "a delete is refused",
+  );
 
   // Nothing was written anywhere, nothing ran, and nothing was toasted: the
   // dialog is the one that explains this and reopens itself.
   assert.equal(runtime.buttonConfigError(), null);
   assert.equal(spawn.calls.length, spawns, "no command ran");
-  assert.equal(calls.toasts.length, toasts, "no toast for the dialog's own refusal");
-  const other = runtime.rows("s2").items.find((item) => item.action.id === "build-mobile");
-  assert.equal(other.action.label, "Build", "the second project's button is unchanged");
   assert.equal(
-    runtime.buttonEditorItems().some((item) => item.label === "Ship it" || item.label === "Added"),
+    calls.toasts.length,
+    toasts,
+    "no toast for the dialog's own refusal",
+  );
+  const other = runtime
+    .rows("s2")
+    .items.find((item) => item.action.id === "build-mobile");
+  assert.equal(
+    other.action.label,
+    "Build",
+    "the second project's button is unchanged",
+  );
+  assert.equal(
+    runtime
+      .buttonEditorItems()
+      .some((item) => item.label === "Ship it" || item.label === "Added"),
     false,
     "and no edit from the first project landed in it",
   );
-  assert.equal(runtime.buttonEditorItems().some((item) => item.id === mine.id), false);
+  assert.equal(
+    runtime.buttonEditorItems().some((item) => item.id === mine.id),
+    false,
+  );
 
   // A call with no capture keeps editing whatever project is active: the
   // capture is an option, not a new requirement.
-  const direct = runtime.saveButton({ id: "build-mobile", label: "Ship it", command: "bash", args: [] });
+  const direct = runtime.saveButton({
+    id: "build-mobile",
+    label: "Ship it",
+    command: "bash",
+    args: [],
+  });
   assert.equal(direct.ok, true);
-  assert.equal(runtime.rows("s2").items.find((item) => item.action.id === "build-mobile").action.label, "Ship it");
+  assert.equal(
+    runtime.rows("s2").items.find((item) => item.action.id === "build-mobile")
+      .action.label,
+    "Ship it",
+  );
 
   // Back in the project the dialog was opened for, the same capture is accepted.
   session = "s1";
   assert.equal(runtime.buttonProject(), captured);
   assert.deepEqual(
-    runtime.saveButton({ id: "build-mobile", label: "Ship it", command: "bash", args: [], project: captured }),
+    runtime.saveButton({
+      id: "build-mobile",
+      label: "Ship it",
+      command: "bash",
+      args: [],
+      project: captured,
+    }),
     { ok: true, id: "build-mobile" },
     "a capture that still matches is accepted",
   );
-  assert.equal(runtime.rows("s1").items.find((item) => item.action.id === "build-mobile").action.label, "Ship it");
+  assert.equal(
+    runtime.rows("s1").items.find((item) => item.action.id === "build-mobile")
+      .action.label,
+    "Ship it",
+  );
   assert.deepEqual(
     runtime.resetButton("build-mobile", captured),
     { ok: true, id: "build-mobile", reset: true },
     "and the override can be cleared",
   );
-  assert.deepEqual(runtime.deleteButton(mine.id, captured), { ok: true, id: mine.id });
-  assert.equal(runtime.rows("s1").items.some((item) => item.action.id === mine.id), false);
+  assert.deepEqual(runtime.deleteButton(mine.id, captured), {
+    ok: true,
+    id: mine.id,
+  });
+  assert.equal(
+    runtime.rows("s1").items.some((item) => item.action.id === mine.id),
+    false,
+  );
 
   await cleanup();
 });
@@ -6862,7 +8433,10 @@ test("the editor reports each button's own working directory, not the project ke
     sessions: { s1: { directory: nested }, s2: { directory: root } },
     route: () => ({ type: "session", sessionID: "s1" }),
   });
-  const cleanup = await startPlugin(context, view, { spawn: createFakeSpawn(), notifyMs: 0 });
+  const cleanup = await startPlugin(context, view, {
+    spawn: createFakeSpawn(),
+    notifyMs: 0,
+  });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
   // The project key is the directory the session is in, which is where a button
@@ -6870,11 +8444,19 @@ test("the editor reports each button's own working directory, not the project ke
   const project = runtime.buttonProject();
   assert.equal(project, nested);
 
-  const custom = runtime.saveButton({ label: "Deploy", command: "bash", args: [] });
+  const custom = runtime.saveButton({
+    label: "Deploy",
+    command: "bash",
+    args: [],
+  });
   const items = runtime.buttonEditorItems();
   const added = items.find((item) => item.id === custom.id);
   assert.equal(added.custom, true);
-  assert.equal(added.cwd, nested, "a hand-added button runs where it was created");
+  assert.equal(
+    added.cwd,
+    nested,
+    "a hand-added button runs where it was created",
+  );
   // A discovered button is not moved to the project key either: it keeps the
   // working directory its action resolved to.
   const dev = items.find((item) => item.id.startsWith("script:"));
@@ -6889,10 +8471,16 @@ test("the editor reports each button's own working directory, not the project ke
 // Discovery order for a directory, independent of any saved order, so a test
 // can state what the default catalog should be.
 function discoveryIds(root) {
-  return discoverActions(createProjectDetector().detect(root)).map((action) => action.id);
+  return discoverActions(createProjectDetector().detect(root)).map(
+    (action) => action.id,
+  );
 }
 
-function openRuntime({ root, buttonConfigFile, spawn = createFakeSpawn() } = {}) {
+function openRuntime({
+  root,
+  buttonConfigFile,
+  spawn = createFakeSpawn(),
+} = {}) {
   const { context, calls } = createContext({
     locationDirectory: root,
     sessions: { s1: { directory: root } },
@@ -6922,17 +8510,38 @@ test("moveButton reorders the sidebar, settings, editor and palette together", a
   });
 
   const after = runtime.actionDescriptors().map((descriptor) => descriptor.id);
-  assert.deepEqual(after, [second, first, ...before.slice(2)], "the catalog order changed");
-  assert.deepEqual(runtime.buttonEditorItems().map((item) => item.id), after, "the editor follows");
-  assert.deepEqual(runtime.rows("s1").items.map((item) => item.action.id), after, "the sidebar follows");
   assert.deepEqual(
-    runtime.settingsItems().map((item) => item.id).slice(0, after.length),
+    after,
+    [second, first, ...before.slice(2)],
+    "the catalog order changed",
+  );
+  assert.deepEqual(
+    runtime.buttonEditorItems().map((item) => item.id),
+    after,
+    "the editor follows",
+  );
+  assert.deepEqual(
+    runtime.rows("s1").items.map((item) => item.action.id),
+    after,
+    "the sidebar follows",
+  );
+  assert.deepEqual(
+    runtime
+      .settingsItems()
+      .map((item) => item.id)
+      .slice(0, after.length),
     after,
     "the settings list follows, before the built-ins",
   );
-  const titles = new Map(runtime.actionDescriptors().map((descriptor) => [descriptor.id, descriptor.title]));
+  const titles = new Map(
+    runtime
+      .actionDescriptors()
+      .map((descriptor) => [descriptor.id, descriptor.title]),
+  );
   assert.deepEqual(
-    calls.layers[0].commands.slice(0, after.length).map((command) => command.title),
+    calls.layers[0].commands
+      .slice(0, after.length)
+      .map((command) => command.title),
     after.map((id) => `Launchpad: ${titles.get(id)}`),
     "the palette follows",
   );
@@ -6972,7 +8581,11 @@ test("a boundary move, a built-in, a bad direction and an unknown id are refused
 
   assert.deepEqual(
     runtime.moveButton("commit", "up"),
-    { ok: false, code: "control-locked", reason: "This button is built in and cannot be reordered." },
+    {
+      ok: false,
+      code: "control-locked",
+      reason: "This button is built in and cannot be reordered.",
+    },
     "a built-in is not reorderable",
   );
   assert.deepEqual(runtime.moveButton(ids[0], "sideways"), {
@@ -7008,15 +8621,23 @@ test("an order is per project and a stale capture cannot move it", async () => {
   });
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
-  const firstIds = runtime.actionDescriptors().map((descriptor) => descriptor.id);
+  const firstIds = runtime
+    .actionDescriptors()
+    .map((descriptor) => descriptor.id);
   const captured = runtime.buttonProject();
   assert.equal(captured, first);
 
   session = "s2";
-  const secondBefore = runtime.actionDescriptors().map((descriptor) => descriptor.id);
+  const secondBefore = runtime
+    .actionDescriptors()
+    .map((descriptor) => descriptor.id);
   assert.deepEqual(
     runtime.moveButton(firstIds[1], "up", captured),
-    { ok: false, code: "project-changed", reason: "Project changed. Reopen the button editor." },
+    {
+      ok: false,
+      code: "project-changed",
+      reason: "Project changed. Reopen the button editor.",
+    },
     "a move captured in the first project is refused after the switch",
   );
   assert.deepEqual(
@@ -7026,10 +8647,18 @@ test("an order is per project and a stale capture cannot move it", async () => {
   );
 
   session = "s1";
-  assert.equal(runtime.moveButton(firstIds[1], "up", captured).ok, true, "a matching capture is accepted");
+  assert.equal(
+    runtime.moveButton(firstIds[1], "up", captured).ok,
+    true,
+    "a matching capture is accepted",
+  );
   const stored = JSON.parse(readFileSync(file, "utf8")).projects;
   assert.ok(stored[first], "only the first project has an order");
-  assert.equal(stored[second], undefined, "the second project was never written");
+  assert.equal(
+    stored[second],
+    undefined,
+    "the second project was never written",
+  );
 
   await cleanup();
 });
@@ -7065,7 +8694,13 @@ test("an old document with no order reads in discovery order", async () => {
     file,
     `${JSON.stringify({
       version: 1,
-      projects: { [root]: { overrides: { "build-mobile": { label: "Ship it", command: "bash", args: [] } } } },
+      projects: {
+        [root]: {
+          overrides: {
+            "build-mobile": { label: "Ship it", command: "bash", args: [] },
+          },
+        },
+      },
       custom: [],
     })}\n`,
   );
@@ -7079,11 +8714,16 @@ test("an old document with no order reads in discovery order", async () => {
     "no stored order means the discovery order",
   );
   assert.equal(
-    runtime.rows("s1").items.find((item) => item.action.id === "build-mobile").action.label,
+    runtime.rows("s1").items.find((item) => item.action.id === "build-mobile")
+      .action.label,
     "Ship it",
     "the old override still applies",
   );
-  assert.equal(runtime.moveButton(discoveryIds(root)[1], "up").ok, true, "and a move still works");
+  assert.equal(
+    runtime.moveButton(discoveryIds(root)[1], "up").ok,
+    true,
+    "and a move still works",
+  );
 
   await cleanup();
 });
@@ -7099,17 +8739,38 @@ test("a stored order skips a removed id and appends a newly discovered one", asy
     file,
     `${JSON.stringify({
       version: 1,
-      projects: { [root]: { overrides: {}, order: [defaultOrder[1], "gone", customId] } },
-      custom: [{ id: customId, project: root, label: "Mine", command: "bash", args: ["x"] }],
+      projects: {
+        [root]: { overrides: {}, order: [defaultOrder[1], "gone", customId] },
+      },
+      custom: [
+        {
+          id: customId,
+          project: root,
+          label: "Mine",
+          command: "bash",
+          args: ["x"],
+        },
+      ],
     })}\n`,
   );
   const { calls, start } = openRuntime({ root, buttonConfigFile: file });
   const cleanup = await start();
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
-  const expected = [defaultOrder[1], customId, ...defaultOrder.filter((id) => id !== defaultOrder[1])];
-  assert.deepEqual(runtime.actionDescriptors().map((descriptor) => descriptor.id), expected);
-  assert.equal(expected.includes("gone"), false, "the removed id is not a button");
+  const expected = [
+    defaultOrder[1],
+    customId,
+    ...defaultOrder.filter((id) => id !== defaultOrder[1]),
+  ];
+  assert.deepEqual(
+    runtime.actionDescriptors().map((descriptor) => descriptor.id),
+    expected,
+  );
+  assert.equal(
+    expected.includes("gone"),
+    false,
+    "the removed id is not a button",
+  );
 
   await cleanup();
 });
@@ -7123,15 +8784,31 @@ test("a hidden button keeps its place and the settings list still shows it", asy
   const hidden = ids[1];
 
   runtime.setVisible(hidden, false);
-  assert.equal(runtime.moveButton(ids[2], "up").ok, true, "the button below swaps with the hidden one");
+  assert.equal(
+    runtime.moveButton(ids[2], "up").ok,
+    true,
+    "the button below swaps with the hidden one",
+  );
 
   const after = runtime.actionDescriptors().map((descriptor) => descriptor.id);
-  assert.deepEqual(after, [ids[0], ids[2], hidden, ...ids.slice(3)], "the hidden button kept its place");
+  assert.deepEqual(
+    after,
+    [ids[0], ids[2], hidden, ...ids.slice(3)],
+    "the hidden button kept its place",
+  );
   const rows = runtime.rows("s1").items.map((item) => item.action.id);
   assert.equal(rows.includes(hidden), false, "the hidden button is not a row");
-  assert.deepEqual(rows, after.filter((id) => id !== hidden), "the visible rows keep the order");
+  assert.deepEqual(
+    rows,
+    after.filter((id) => id !== hidden),
+    "the visible rows keep the order",
+  );
   const settings = runtime.settingsItems().map((item) => item.id);
-  assert.equal(settings.includes(hidden), true, "the settings list still shows the hidden button");
+  assert.equal(
+    settings.includes(hidden),
+    true,
+    "the settings list still shows the hidden button",
+  );
   assert.equal(settings.indexOf(hidden), after.indexOf(hidden), "in its place");
 
   await cleanup();
@@ -7140,21 +8817,39 @@ test("a hidden button keeps its place and the settings list still shows it", asy
 test("a hand-added button reorders among discovered scripts and Cargo actions", async () => {
   const root = fixture({
     ".git/HEAD": "ref: refs/heads/main\n",
-    "Cargo.toml": "[package]\nname = \"mix\"\n",
-    "package.json": { scripts: { test: "node --test", build: "node build.js" } },
+    "Cargo.toml": '[package]\nname = "mix"\n',
+    "package.json": {
+      scripts: { test: "node --test", build: "node build.js" },
+    },
   });
   const { calls, start } = openRuntime({ root });
   const cleanup = await start();
   const runtime = calls.slots[0].render({ sessionID: "s1" }).props.runtime;
 
   const ids = runtime.actionDescriptors().map((descriptor) => descriptor.id);
-  assert.ok(ids.some((id) => id.startsWith("cargo-")), "Cargo actions are discovered");
-  assert.ok(ids.some((id) => id.startsWith("script:")), "and so are the scripts");
+  assert.ok(
+    ids.some((id) => id.startsWith("cargo-")),
+    "Cargo actions are discovered",
+  );
+  assert.ok(
+    ids.some((id) => id.startsWith("script:")),
+    "and so are the scripts",
+  );
 
-  const added = runtime.saveButton({ label: "Deploy", command: "bash", args: ["ship.sh"] });
+  const added = runtime.saveButton({
+    label: "Deploy",
+    command: "bash",
+    args: ["ship.sh"],
+  });
   assert.equal(added.ok, true);
-  const withCustom = runtime.actionDescriptors().map((descriptor) => descriptor.id);
-  assert.equal(withCustom[withCustom.length - 1], added.id, "a new custom button appends");
+  const withCustom = runtime
+    .actionDescriptors()
+    .map((descriptor) => descriptor.id);
+  assert.equal(
+    withCustom[withCustom.length - 1],
+    added.id,
+    "a new custom button appends",
+  );
 
   assert.equal(runtime.moveButton(added.id, "up").ok, true);
   const after = runtime.actionDescriptors().map((descriptor) => descriptor.id);
@@ -7179,8 +8874,15 @@ test("reordering never changes a run's identity or starts anything", async () =>
   const spawns = spawn.calls.length;
   assert.equal(runtime.moveButton(ids[0], "down").ok, true);
   assert.equal(spawn.calls.length, spawns, "a move does not spawn");
-  assert.ok(runtime.snapshot(started.key), "the run is still tracked under the same key");
-  assert.equal(runtime.snapshot(started.key).actionId, ids[0], "its action id is unchanged");
+  assert.ok(
+    runtime.snapshot(started.key),
+    "the run is still tracked under the same key",
+  );
+  assert.equal(
+    runtime.snapshot(started.key).actionId,
+    ids[0],
+    "its action id is unchanged",
+  );
 
   await cleanup();
 });

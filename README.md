@@ -36,8 +36,8 @@ live log dialog. Buttons come from the project's package scripts and Cargo manif
 build, install, and analysis actions. Existing zsh aliases are not changed. Discovery never starts a
 script; running an action requires a click or a palette command.
 
-The npm package is `opencode-launchpad`. The registered plugin id `local.control`, the palette
-command ids `local.control.<action>`, and the persistence keys and config paths below keep the older
+The npm package is `opencode-launchpad`. The registered plugin id `local.launchpad`, the palette
+command ids `local.launchpad.<action>`, and the persistence keys and config paths below keep the older
 `control` name on purpose, so existing host storage, config files, and saved keybindings stay valid.
 The rename changes only user-visible text. See "Name and identity".
 
@@ -59,14 +59,14 @@ The rename changes only user-visible text. See "Name and identity".
 
 ## Rows
 
-| Button | Alias | Runs | Shown when |
-| --- | --- | --- | --- |
-| Build | `vet-build` | `build:mobile:hosted`, else `build:mobile` | the script exists |
-| Live mobile | `vet-live` | `live`, else `flutter run` | the script exists, or a Flutter project is above the folder |
-| Live web | `vet-live-web` | `live:web`, else `flutter run -d web-server` | the script exists, or Flutter plus a `web/` folder |
-| Next live | – | `dev:web`, else `dev` | `dev:web` exists, or `dev` exists and `next` is a dependency |
-| ADB install | – | `adb install -r <apk>`, else `install:adb` | a built APK exists, or an install script exists |
-| Analyze | – | `mobile:analyze`, else `analyze`, else `flutter analyze` | a script exists, or a Flutter project is above the folder |
+| Button      | Alias          | Runs                                                     | Shown when                                                   |
+| ----------- | -------------- | -------------------------------------------------------- | ------------------------------------------------------------ |
+| Build       | `vet-build`    | `build:mobile:hosted`, else `build:mobile`               | the script exists                                            |
+| Live mobile | `vet-live`     | `live`, else `flutter run`                               | the script exists, or a Flutter project is above the folder  |
+| Live web    | `vet-live-web` | `live:web`, else `flutter run -d web-server`             | the script exists, or Flutter plus a `web/` folder           |
+| Next live   | –              | `dev:web`, else `dev`                                    | `dev:web` exists, or `dev` exists and `next` is a dependency |
+| ADB install | –              | `adb install -r <apk>`, else `install:adb`               | a built APK exists, or an install script exists              |
+| Analyze     | –              | `mobile:analyze`, else `analyze`, else `flutter analyze` | a script exists, or a Flutter project is above the folder    |
 
 Every other defined package script, including `test`, gets a button. A specialized action claims
 only the script and package it actually runs, so that script does not get a duplicate button.
@@ -188,7 +188,7 @@ or `lerna.json`. A directory outside such a boundary never inherits an unrelated
 Each action resolves against that chain and runs from the folder that owns the script:
 
 - Vetory root session: all six buttons; every command runs from the repository root, and `ADB
-  install` runs from `apps/mobile`, where the APK was built.
+install` runs from `apps/mobile`, where the APK was built.
 - `apps/web` session: all six buttons. `Next live` uses `apps/web`'s own `dev` script and runs from
   `apps/web`; `Build`, `Live mobile`, and `Live web` borrow the root scripts and run from the root.
 - A project with its own `package.json` but no boundary: only that package's own scripts count, so no
@@ -208,13 +208,13 @@ Two columns, as many rows as the discovered actions need, each cell a bordered r
 row-major, so a project with two supported actions shows a single row. A lone button fills the
 whole row and centers its label, including Git and utility rows with one visible control.
 
-| | left | right |
-| --- | --- | --- |
-| git | Commit | Push |
-| row 1 | Build | Live mobile |
-| row 2 | Live web | Next live |
-| row 3 | ADB install | Analyze |
-| controls | Stop all | Show logs |
+|          | left        | right       |
+| -------- | ----------- | ----------- |
+| git      | Commit      | Push        |
+| row 1    | Build       | Live mobile |
+| row 2    | Live web    | Next live   |
+| row 3    | ADB install | Analyze     |
+| controls | Stop all    | Show logs   |
 
 Clicking the section header collapses the rows and leaves the header in place, last in the sidebar.
 The arrow is a white full triangle, `▼` while expanded and `▶` while collapsed, and the title keeps
@@ -236,13 +236,13 @@ a button can never read as a gray block outside its frame. Every label uses `tex
 foreground the sidebar itself draws with, so no state can dim a label into the background. The frame
 carries the state:
 
-| State | Border | Label |
-| --- | --- | --- |
-| idle | `border.base`, single | `text.base` |
-| hover | `text.base`, single | `text.base` |
-| running | `text.base`, double | `text.base` |
-| finished / stopped | `border.base`, single | `text.base` |
-| failed | `text.feedback.error.base`, heavy | `text.base` |
+| State              | Border                            | Label       |
+| ------------------ | --------------------------------- | ----------- |
+| idle               | `border.base`, single             | `text.base` |
+| hover              | `text.base`, single               | `text.base` |
+| running            | `text.base`, double               | `text.base` |
+| finished / stopped | `border.base`, single             | `text.base` |
+| failed             | `text.feedback.error.base`, heavy | `text.base` |
 
 A finished run looks like an idle button again: it stays clickable, and the log dialog carries the
 result. Hover only brightens an idle frame; a running or failed button keeps its own frame so the
@@ -342,15 +342,15 @@ elsewhere leaves the wheel as the scrolling path.
 
 Counters:
 
-| Where | Shows |
-| --- | --- |
-| Status line, running | `running 42s · 137 lines`, refreshed once a second |
-| Status line, stopping | `stopping after 8s · 137 lines`, while a stop is in flight |
-| Status line, leftovers | `stopped after 8s, leftovers still stopping`, `leftovers still stopping` |
-| Status line, finished | `finished in 42s · 137 lines`, frozen at the final duration |
-| Status line, stopped / failed | `stopped after 8s`, `failed after 3s (exit 1)` |
-| Status line, refused stop | any of the above plus ` · stop signal failed (EPERM: …)` |
-| Progress line | the child's own latest carriage-return line, e.g. Gradle's `Running Gradle task …` |
+| Where                         | Shows                                                                              |
+| ----------------------------- | ---------------------------------------------------------------------------------- |
+| Status line, running          | `running 42s · 137 lines`, refreshed once a second                                 |
+| Status line, stopping         | `stopping after 8s · 137 lines`, while a stop is in flight                         |
+| Status line, leftovers        | `stopped after 8s, leftovers still stopping`, `leftovers still stopping`           |
+| Status line, finished         | `finished in 42s · 137 lines`, frozen at the final duration                        |
+| Status line, stopped / failed | `stopped after 8s`, `failed after 3s (exit 1)`                                     |
+| Status line, refused stop     | any of the above plus ` · stop signal failed (EPERM: …)`                           |
+| Progress line                 | the child's own latest carriage-return line, e.g. Gradle's `Running Gradle task …` |
 
 A carriage return rewrites the current line instead of appending one, so a counter that redraws itself
 stays a single live line. When that line is finished by a newline it becomes normal history. Only a
@@ -399,19 +399,19 @@ checkout, the directory).
 
 ### Name and identity
 
-| What | Value | Visible to users |
-| --- | --- | --- |
-| Section heading, palette group, palette titles | `Launchpad` | yes |
-| npm package | `opencode-launchpad` | install name only |
-| Registered plugin id | `local.control` | no |
-| Palette command ids | `local.control.<action>` | no (the palette shows titles) |
-| Persistence keys and config paths | `control.visibility`, `control.buttons`, `opencode/control/…` | no |
+| What                                           | Value                                                         | Visible to users              |
+| ---------------------------------------------- | ------------------------------------------------------------- | ----------------------------- |
+| Section heading, palette group, palette titles | `Launchpad`                                                   | yes                           |
+| npm package                                    | `opencode-launchpad`                                          | install name only             |
+| Registered plugin id                           | `local.launchpad`                                             | no                            |
+| Palette command ids                            | `local.launchpad.<action>`                                    | no (the palette shows titles) |
+| Persistence keys and config paths              | `control.visibility`, `control.buttons`, `opencode/control/…` | no                            |
 
 Only the visible text was renamed. The plugin id, every command id, the persistence keys
 (`control.visibility`, `control.buttons`) and the config fallback paths (`opencode/control/`) keep the
 older `control` name on purpose, so existing host storage, config files, and saved keybindings stay
 valid. Command ids can be referenced by user keybindings: a keybinding that used
-`local.project-runners.<action>` must now use `local.control.<action>`. `opencode plugin list` shows
+`local.project-runners.<action>` must now use `local.launchpad.<action>`. `opencode plugin list` shows
 `-` in the ID column for every local plugin, so nothing there displays the id.
 
 ## Tests

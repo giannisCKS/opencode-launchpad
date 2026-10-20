@@ -9,11 +9,18 @@ import {
   resolveSessionDirectory,
 } from "./runners.js";
 import { createGitActions, LUNA_MODEL, selectCommitGenerator } from "./git.js";
-import { CONTROL_ITEMS, createVisibilityStore, defaultVisibilityFile } from "./visibility.js";
+import {
+  CONTROL_ITEMS,
+  createVisibilityStore,
+  defaultVisibilityFile,
+} from "./visibility.js";
 import { createGitDetector } from "./git-detection.js";
-import { createButtonConfigStore, defaultButtonConfigFile } from "./button-config.js";
+import {
+  createButtonConfigStore,
+  defaultButtonConfigFile,
+} from "./button-config.js";
 
-export const PLUGIN_ID = "local.control";
+export const PLUGIN_ID = "local.launchpad";
 
 function notify(context, message, variant) {
   try {
@@ -28,7 +35,11 @@ function notify(context, message, variant) {
 function currentSessionID(context) {
   try {
     const route = context.ui?.router?.current?.();
-    if (route && route.type === "session" && typeof route.sessionID === "string") {
+    if (
+      route &&
+      route.type === "session" &&
+      typeof route.sessionID === "string"
+    ) {
       return route.sessionID;
     }
   } catch {
@@ -75,9 +86,17 @@ export function createRuntime({
     } else if (!snapshot.running) {
       notify(context, `${snapshot.label}: already ${snapshot.status}`, "info");
     } else if (!snapshot.stdin) {
-      notify(context, `${snapshot.label}: ${snapshot.display} does not take reload input`, "warning");
+      notify(
+        context,
+        `${snapshot.label}: ${snapshot.display} does not take reload input`,
+        "warning",
+      );
     } else {
-      notify(context, `${snapshot.label}: reload input could not be delivered`, "error");
+      notify(
+        context,
+        `${snapshot.label}: reload input could not be delivered`,
+        "error",
+      );
     }
     return false;
   }
@@ -94,7 +113,8 @@ export function createRuntime({
     const onClose = () => {
       if (ownedLog === token) ownedLog = undefined;
     };
-    const render = () => view.LogDialog({ context, runtime, runKey: key, onClose });
+    const render = () =>
+      view.LogDialog({ context, runtime, runKey: key, onClose });
     const dialog = context.ui?.dialog;
     const open = () => {
       if (typeof dialog?.replace === "function") {
@@ -132,11 +152,16 @@ export function createRuntime({
 
   // Resolved at click time: the active tab, not the tab that painted the row.
   function startAction(actionId) {
-    const dir = resolveSessionDirectory(context, currentSessionID(context) ?? lastSessionID);
+    const dir = resolveSessionDirectory(
+      context,
+      currentSessionID(context) ?? lastSessionID,
+    );
     const project = detector.detect(dir, { fresh: true });
     // The button's effective configuration is re-resolved here, so a click
     // always runs what the user last saved, never a stale captured row.
-    const descriptor = effectiveDescriptors(project).find((entry) => entry.id === actionId);
+    const descriptor = effectiveDescriptors(project).find(
+      (entry) => entry.id === actionId,
+    );
     const resolution = descriptor
       ? resolveEffective(descriptor, project)
       : resolveAction(actionId, project);
@@ -177,7 +202,9 @@ export function createRuntime({
     try {
       const list = discoverActions(project);
       return Array.isArray(list)
-        ? list.filter((entry) => entry && typeof entry.id === "string" && entry.id)
+        ? list.filter(
+            (entry) => entry && typeof entry.id === "string" && entry.id,
+          )
         : [];
     } catch {
       // Discovery is best effort: a broken project never breaks the sidebar.
@@ -312,7 +339,8 @@ export function createRuntime({
     const keys = new Set();
     for (const descriptor of effectiveDescriptors(project)) {
       const resolution = resolveEffective(descriptor, project);
-      if (resolution.ok) keys.add(manager.keyFor(resolution.actionId, resolution.cwd));
+      if (resolution.ok)
+        keys.add(manager.keyFor(resolution.actionId, resolution.cwd));
     }
     for (const run of manager.list()) {
       if (run.cwd && run.cwd === configDir(project)) keys.add(run.key);
@@ -372,7 +400,10 @@ export function createRuntime({
   }
 
   function currentDirectory() {
-    return resolveSessionDirectory(context, currentSessionID(context) ?? lastSessionID);
+    return resolveSessionDirectory(
+      context,
+      currentSessionID(context) ?? lastSessionID,
+    );
   }
 
   // Show logs: this project's active run first, then its most recent one, since
@@ -384,7 +415,8 @@ export function createRuntime({
     if (running) return running.key;
     let latest;
     for (const run of mine) {
-      if (!latest || (run.startedAt ?? 0) > (latest.startedAt ?? 0)) latest = run;
+      if (!latest || (run.startedAt ?? 0) > (latest.startedAt ?? 0))
+        latest = run;
     }
     return latest?.key;
   }
@@ -419,7 +451,9 @@ export function createRuntime({
     }
     const parts = [];
     if (signalled.length) {
-      parts.push(`Stopped ${signalled.length} runner${signalled.length === 1 ? "" : "s"}`);
+      parts.push(
+        `Stopped ${signalled.length} runner${signalled.length === 1 ? "" : "s"}`,
+      );
     }
     if (already) parts.push(`${already} already stopping`);
     if (failedKeys.size) parts.push(`${failedKeys.size} could not be stopped`);
@@ -444,7 +478,11 @@ export function createRuntime({
       notify(context, `${snapshot.label}: already ${snapshot.status}`, "info");
       return false;
     }
-    notify(context, `${snapshot.label}: ${snapshot.stopError ?? "could not be stopped"}`, "error");
+    notify(
+      context,
+      `${snapshot.label}: ${snapshot.stopError ?? "could not be stopped"}`,
+      "error",
+    );
     return false;
   }
 
@@ -543,7 +581,8 @@ export function createRuntime({
         ok: false,
         error: {
           code: "generator-probe-failed",
-          message: "This host cannot list both providers and models, so the Luna generator cannot be checked.",
+          message:
+            "This host cannot list both providers and models, so the Luna generator cannot be checked.",
         },
       };
     }
@@ -569,16 +608,23 @@ export function createRuntime({
         }, GENERATOR_PROBE_TIMEOUT_MS);
       });
       const [providers, models] = await Promise.race([metadata, timedOut]);
-      const selected = selectCommitGenerator({ providers: providers?.data, models: models?.data });
+      const selected = selectCommitGenerator({
+        providers: providers?.data,
+        models: models?.data,
+      });
       if (!selected?.ok || !selected.generator) return selected;
-      return { ...selected, generator: { ...selected.generator, verified: true } };
+      return {
+        ...selected,
+        generator: { ...selected.generator, verified: true },
+      };
     } catch (error) {
       if (error?.code === "generator-probe-timeout") {
         return {
           ok: false,
           error: {
             code: "generator-probe-failed",
-            message: "The host timed out while returning provider and model metadata, so the Luna generator could not be checked.",
+            message:
+              "The host timed out while returning provider and model metadata, so the Luna generator could not be checked.",
           },
         };
       }
@@ -586,7 +632,8 @@ export function createRuntime({
         ok: false,
         error: {
           code: "generator-probe-failed",
-          message: "The Luna generator could not be checked from the host provider and model lists.",
+          message:
+            "The Luna generator could not be checked from the host provider and model lists.",
         },
       };
     } finally {
@@ -819,7 +866,8 @@ export function createRuntime({
       } catch {
         return { ids, failed: true, incomplete: true };
       }
-      if (!Array.isArray(result?.data)) return { ids, failed: true, incomplete: true };
+      if (!Array.isArray(result?.data))
+        return { ids, failed: true, incomplete: true };
       let added = 0;
       for (const entry of result.data) {
         // The server filters by `type`, but do not trust a mixed page to add a
@@ -832,10 +880,12 @@ export function createRuntime({
         added += 1;
       }
       const next = result?.cursor?.next;
-      if (typeof next !== "string" || !next) return { ids, failed: false, incomplete: false };
+      if (typeof next !== "string" || !next)
+        return { ids, failed: false, incomplete: false };
       if (added === 0) return { ids, failed: false, incomplete: true };
       cursor = next;
-      if (page === MESSAGE_PAGE_CAP - 1) return { ids, failed: false, incomplete: true };
+      if (page === MESSAGE_PAGE_CAP - 1)
+        return { ids, failed: false, incomplete: true };
     }
     return { ids, failed: false, incomplete: true };
   }
@@ -846,7 +896,13 @@ export function createRuntime({
   async function readTurnDiffs(sessionID, ids) {
     const session = context.client?.session;
     if (typeof session?.diff !== "function") {
-      return { files: new Set(), resolved: false, failed: 0, unreadable: true, truncated: false };
+      return {
+        files: new Set(),
+        resolved: false,
+        failed: 0,
+        unreadable: true,
+        truncated: false,
+      };
     }
     const wanted = ids.slice(-TURN_DIFF_CAP);
     const files = new Set();
@@ -866,7 +922,13 @@ export function createRuntime({
       resolved = true;
       addEntryPaths(files, entries);
     }
-    return { files, resolved, failed, unreadable: false, truncated: ids.length > wanted.length };
+    return {
+      files,
+      resolved,
+      failed,
+      unreadable: false,
+      truncated: ids.length > wanted.length,
+    };
   }
 
   // The no-argument diff answers the newest user turn only. It is a fallback
@@ -891,7 +953,8 @@ export function createRuntime({
     const raw =
       typeof record?.directory === "string" && record.directory
         ? record.directory
-        : typeof record?.location?.directory === "string" && record.location.directory
+        : typeof record?.location?.directory === "string" &&
+            record.location.directory
           ? record.location.directory
           : null;
     return raw === null ? null : path.resolve(raw);
@@ -905,10 +968,18 @@ export function createRuntime({
   // captured folder instead; a child in another or unverifiable folder is
   // skipped, never attributed by name. A cursor that does not advance (no new
   // child) ends the walk instead of looping.
-  async function listSessionChildren(session, parentID, directory, options = {}) {
+  async function listSessionChildren(
+    session,
+    parentID,
+    directory,
+    options = {},
+  ) {
     const limit = options.limit ?? SESSION_PAGE_LIMIT;
     const maxPages = options.maxPages ?? SESSION_PAGE_CAP;
-    const captured = typeof directory === "string" && directory ? path.resolve(directory) : null;
+    const captured =
+      typeof directory === "string" && directory
+        ? path.resolve(directory)
+        : null;
     const records = [];
     const seen = new Set();
     let failed = false;
@@ -927,7 +998,8 @@ export function createRuntime({
         // A rejected request is a failure, not evidence of a larger tree.
         return { records, failed: true, truncated, skipped };
       }
-      if (!Array.isArray(result?.data)) return { records, failed: true, truncated, skipped };
+      if (!Array.isArray(result?.data))
+        return { records, failed: true, truncated, skipped };
       let considered = 0;
       for (const record of result.data) {
         if (record?.parentID !== parentID) continue;
@@ -945,10 +1017,13 @@ export function createRuntime({
         records.push(id);
       }
       const next = result?.cursor?.next;
-      if (typeof next !== "string" || !next) return { records, failed, truncated, skipped };
-      if (considered === 0) return { records, failed, truncated: true, skipped };
+      if (typeof next !== "string" || !next)
+        return { records, failed, truncated, skipped };
+      if (considered === 0)
+        return { records, failed, truncated: true, skipped };
       cursor = next;
-      if (page === maxPages - 1) return { records, failed, truncated: true, skipped };
+      if (page === maxPages - 1)
+        return { records, failed, truncated: true, skipped };
     }
     return { records, failed, truncated: true, skipped };
   }
@@ -960,7 +1035,13 @@ export function createRuntime({
   // the bound is only reported when it actually hides something.
   async function readDescendantSessions(session, rootID, directory) {
     if (typeof session?.list !== "function") {
-      return { ids: [], failed: false, unsupported: true, truncated: false, skipped: false };
+      return {
+        ids: [],
+        failed: false,
+        unsupported: true,
+        truncated: false,
+        skipped: false,
+      };
     }
     const ids = [];
     const seen = new Set([rootID]);
@@ -1004,7 +1085,10 @@ export function createRuntime({
 
   // One session's confirmed files. The legacy snapshot only exists for the root;
   // children are always read through the live client.
-  async function readSessionChanges(sessionID, { legacySnapshot = false } = {}) {
+  async function readSessionChanges(
+    sessionID,
+    { legacySnapshot = false } = {},
+  ) {
     if (legacySnapshot) {
       try {
         const snapshot = context.state?.session?.diff?.(sessionID);
@@ -1027,7 +1111,8 @@ export function createRuntime({
       for (const file of perTurn.files) files.add(file);
       if (perTurn.resolved) {
         // An incomplete walk still returns its confirmed turns; say so.
-        if (turns.incomplete) return { files: [...files], warning: INCOMPLETE_WARNING };
+        if (turns.incomplete)
+          return { files: [...files], warning: INCOMPLETE_WARNING };
         if (perTurn.failed > 0 || perTurn.truncated) {
           return { files: [...files], warning: UNRESOLVED_WARNING };
         }
@@ -1042,7 +1127,8 @@ export function createRuntime({
       if (turns === null || turns.failed || resolution === "failed") {
         return { files: [...files], warning: UNRESOLVED_WARNING };
       }
-      if (turns.incomplete) return { files: [...files], warning: INCOMPLETE_WARNING };
+      if (turns.incomplete)
+        return { files: [...files], warning: INCOMPLETE_WARNING };
       return { files: [...files], warning: "" };
     }
 
@@ -1056,12 +1142,17 @@ export function createRuntime({
   // cannot be read keeps the root and the siblings it already confirmed, and the
   // partial result is stated.
   async function sessionChangedFiles(sessionID, directory) {
-    if (typeof sessionID !== "string" || !sessionID) return { files: [], warning: "" };
+    if (typeof sessionID !== "string" || !sessionID)
+      return { files: [], warning: "" };
 
     const root = await readSessionChanges(sessionID, { legacySnapshot: true });
     const files = new Set(root.files);
     const warnings = root.warning ? [root.warning] : [];
-    const descendants = await readDescendantSessions(context.client?.session, sessionID, directory);
+    const descendants = await readDescendantSessions(
+      context.client?.session,
+      sessionID,
+      directory,
+    );
     if (descendants.unsupported) {
       warnings.push(CHILD_UNSUPPORTED_WARNING);
     } else {
@@ -1131,11 +1222,21 @@ export function createRuntime({
     current.error = null;
     current.notice = "";
     flowChanged();
-    const attribution = await sessionChangedFiles(current.sessionID, current.directory);
-    const result = await current.actions.status({ cwd: current.directory, sessionFiles: attribution.files });
+    const attribution = await sessionChangedFiles(
+      current.sessionID,
+      current.directory,
+    );
+    const result = await current.actions.status({
+      cwd: current.directory,
+      sessionFiles: attribution.files,
+    });
     if (flow !== current) return null;
     if (!result?.ok) {
-      notify(context, `Commit: ${result?.error?.message ?? "git status failed"}`, "error");
+      notify(
+        context,
+        `Commit: ${result?.error?.message ?? "git status failed"}`,
+        "error",
+      );
       closeFlow();
       return result;
     }
@@ -1153,12 +1254,18 @@ export function createRuntime({
       // Keep the user's choices, dropping paths that are gone or no longer
       // selectable. Nothing is added back, so an ignored path and the new
       // .gitignore entry are never checked on the user's behalf.
-      const eligible = new Set(result.files.filter((file) => !file.blocked).map((file) => file.path));
-      current.selection = new Set([...preserve.selection].filter((path) => eligible.has(path)));
+      const eligible = new Set(
+        result.files.filter((file) => !file.blocked).map((file) => file.path),
+      );
+      current.selection = new Set(
+        [...preserve.selection].filter((path) => eligible.has(path)),
+      );
     } else {
       // Only confirmed session changes start checked; unsafe files never do.
       current.selection = new Set(
-        current.files.filter((file) => file.session === true && !file.blocked).map((file) => file.path),
+        current.files
+          .filter((file) => file.session === true && !file.blocked)
+          .map((file) => file.path),
       );
     }
     current.step = "files";
@@ -1188,7 +1295,13 @@ export function createRuntime({
       current.busy = "";
       notify(context, "Push: the push could not be prepared", "error");
       closeFlow();
-      return { ok: false, error: { code: "push-preview-failed", message: "the push could not be prepared" } };
+      return {
+        ok: false,
+        error: {
+          code: "push-preview-failed",
+          message: "the push could not be prepared",
+        },
+      };
     }
     if (flow !== current) {
       // The flow was cancelled while git was resolving the target. Its token is
@@ -1203,7 +1316,11 @@ export function createRuntime({
       return null;
     }
     if (!result?.ok) {
-      notify(context, `Push: ${result?.error?.message ?? "the push could not be prepared"}`, "error");
+      notify(
+        context,
+        `Push: ${result?.error?.message ?? "the push could not be prepared"}`,
+        "error",
+      );
       closeFlow();
       return result;
     }
@@ -1225,7 +1342,13 @@ export function createRuntime({
 
   function askPushConfirm() {
     const current = flow;
-    if (!current || current.step !== "push-review" || !current.pushToken || current.busy) return false;
+    if (
+      !current ||
+      current.step !== "push-review" ||
+      !current.pushToken ||
+      current.busy
+    )
+      return false;
     current.step = "push-confirm";
     current.error = null;
     flowChanged();
@@ -1238,19 +1361,32 @@ export function createRuntime({
   // true: a caller cannot push from the review step, only from the confirmation.
   async function runPush() {
     const current = flow;
-    if (!current || current.step !== "push-confirm" || !current.pushToken || current.busy) return null;
+    if (
+      !current ||
+      current.step !== "push-confirm" ||
+      !current.pushToken ||
+      current.busy
+    )
+      return null;
     current.busy = PUSH_BUSY;
     current.error = null;
     flowChanged();
     let result;
     try {
-      result = await current.actions.push({ token: current.pushToken, confirm: true });
+      result = await current.actions.push({
+        token: current.pushToken,
+        confirm: true,
+      });
     } catch {
       // The remote may have received the push before the service rejected the
       // call. Give one safe diagnostic without the thrown text.
       const failure = {
         ok: false,
-        error: { code: "push-failed", message: "The push outcome is unknown; check the remote before retrying" },
+        error: {
+          code: "push-failed",
+          message:
+            "The push outcome is unknown; check the remote before retrying",
+        },
       };
       if (flow !== current) {
         notify(context, `Push: ${failure.error.message}`, "error");
@@ -1266,16 +1402,27 @@ export function createRuntime({
       // The dialog was closed while the push ran. The outcome still matters, so
       // say it once without reopening or mutating the dead flow.
       if (result?.ok) {
-        notify(context, `Pushed ${result.branch} to ${result.remote}/${result.remoteBranch}`, "info");
+        notify(
+          context,
+          `Pushed ${result.branch} to ${result.remote}/${result.remoteBranch}`,
+          "info",
+        );
       } else {
-        notify(context, `Push: ${result?.error?.message ?? "the push failed"}`, "error");
+        notify(
+          context,
+          `Push: ${result?.error?.message ?? "the push failed"}`,
+          "error",
+        );
       }
       releaseClosedTokens(current);
       return result;
     }
     current.busy = "";
     if (!result?.ok) {
-      current.error = result?.error ?? { code: "push-failed", message: "the push failed" };
+      current.error = result?.error ?? {
+        code: "push-failed",
+        message: "the push failed",
+      };
       flowChanged();
       return result;
     }
@@ -1337,7 +1484,10 @@ export function createRuntime({
     flowChanged();
     let result;
     try {
-      result = await current.actions.addToGitignore({ cwd: current.directory, file: filePath });
+      result = await current.actions.addToGitignore({
+        cwd: current.directory,
+        file: filePath,
+      });
     } catch (error) {
       // A rejected service call is reported like a refused one: the flow stays
       // open with its choices, the busy flag clears, and the failure is named.
@@ -1347,7 +1497,10 @@ export function createRuntime({
           ? error.message.slice(0, 200)
           : "the ignore request failed";
       current.busy = "";
-      current.error = { code: "ignore-failed", message: `the file could not be ignored: ${detail}` };
+      current.error = {
+        code: "ignore-failed",
+        message: `the file could not be ignored: ${detail}`,
+      };
       notify(context, `Ignore: ${current.error.message}`, "error");
       flowChanged();
       return { ok: false, error: current.error };
@@ -1356,7 +1509,10 @@ export function createRuntime({
     if (flow !== current) return null;
     current.busy = "";
     if (!result?.ok) {
-      const error = result?.error ?? { code: "ignore-failed", message: "the file could not be ignored" };
+      const error = result?.error ?? {
+        code: "ignore-failed",
+        message: "the file could not be ignored",
+      };
       current.error = error;
       notify(context, `Ignore: ${error.message}`, "error");
       flowChanged();
@@ -1394,7 +1550,10 @@ export function createRuntime({
       // gets a safe generic diagnostic instead.
       if (flow !== current) return null;
       current.busy = "";
-      current.error = { code: "preview-failed", message: "The review could not be prepared" };
+      current.error = {
+        code: "preview-failed",
+        message: "The review could not be prepared",
+      };
       current.step = "files";
       flowChanged();
       return null;
@@ -1414,7 +1573,10 @@ export function createRuntime({
     }
     current.busy = "";
     if (!result?.ok) {
-      current.error = result?.error ?? { code: "preview-failed", message: "the preview failed" };
+      current.error = result?.error ?? {
+        code: "preview-failed",
+        message: "the preview failed",
+      };
       current.generator = null;
       // Whatever review was replaced is gone, so its message must not survive
       // into the next one.
@@ -1482,7 +1644,12 @@ export function createRuntime({
     current.error = null;
     flowChanged();
     const selected = await probeCommitGenerator();
-    if (flow !== current || current.token !== token || current.step !== "preview") return false;
+    if (
+      flow !== current ||
+      current.token !== token ||
+      current.step !== "preview"
+    )
+      return false;
     current.busy = "";
     if (!selected?.ok) {
       current.error = selected?.error ?? {
@@ -1505,7 +1672,13 @@ export function createRuntime({
   // reported, never retried against another provider.
   async function runGenerate() {
     const current = flow;
-    if (!current || current.step !== "preview" || !current.token || current.busy) return null;
+    if (
+      !current ||
+      current.step !== "preview" ||
+      !current.token ||
+      current.busy
+    )
+      return null;
     // The button is disabled without a resolved generator, and the preflight error
     // already explains why. A programmatic press is a no-op, never a fallback.
     if (!current.generator) return null;
@@ -1526,14 +1699,20 @@ export function createRuntime({
       // review only ever sees this safe, generic diagnostic.
       if (flow !== current) return null;
       current.busy = "";
-      current.error = { code: "generation-failed", message: "Luna message generation failed" };
+      current.error = {
+        code: "generation-failed",
+        message: "Luna message generation failed",
+      };
       flowChanged();
       return null;
     }
     if (flow !== current) return null;
     current.busy = "";
     if (!result?.ok) {
-      current.error = result?.error ?? { code: "generate-failed", message: "no message was generated" };
+      current.error = result?.error ?? {
+        code: "generate-failed",
+        message: "no message was generated",
+      };
       flowChanged();
       return result;
     }
@@ -1626,13 +1805,20 @@ export function createRuntime({
     flowChanged();
     let result;
     try {
-      result = await current.actions.commit({ token: current.token, message: current.message });
+      result = await current.actions.commit({
+        token: current.token,
+        message: current.message,
+      });
     } catch {
       // A rejecting service cannot tell us whether the commit landed. Never
       // surface its thrown text, and never imply a retry is safe.
       const failure = {
         ok: false,
-        error: { code: "commit-failed", message: "The commit outcome is unknown; check the repository before retrying" },
+        error: {
+          code: "commit-failed",
+          message:
+            "The commit outcome is unknown; check the repository before retrying",
+        },
       };
       if (flow !== current) {
         notify(context, failure.error.message, "error");
@@ -1650,13 +1836,23 @@ export function createRuntime({
       // released only now, after git may still have been using its index.
       if (result?.ok) {
         const count = Array.isArray(result.files) ? result.files.length : 0;
-        const hash = typeof result.hash === "string" ? result.hash.slice(0, 12) : "";
-        notify(context, `Committed ${count} file${count === 1 ? "" : "s"}${hash ? ` · ${hash}` : ""}`, "info");
-      } else {
-        const error = result?.error ?? { code: "commit-failed", message: "the commit failed" };
+        const hash =
+          typeof result.hash === "string" ? result.hash.slice(0, 12) : "";
         notify(
           context,
-          error.hash ? `Commit exists as ${error.hash} — do not retry` : `Commit: ${error.message}`,
+          `Committed ${count} file${count === 1 ? "" : "s"}${hash ? ` · ${hash}` : ""}`,
+          "info",
+        );
+      } else {
+        const error = result?.error ?? {
+          code: "commit-failed",
+          message: "the commit failed",
+        };
+        notify(
+          context,
+          error.hash
+            ? `Commit exists as ${error.hash} — do not retry`
+            : `Commit: ${error.message}`,
           "error",
         );
       }
@@ -1665,19 +1861,27 @@ export function createRuntime({
     }
     current.busy = "";
     if (!result?.ok) {
-      const error = result?.error ?? { code: "commit-failed", message: "the commit failed" };
+      const error = result?.error ?? {
+        code: "commit-failed",
+        message: "the commit failed",
+      };
       current.error = error;
       if (error.hash) {
         // The commit exists. Show the hash and stop here: retrying would create a
         // second commit. The token stays so closing still drops the review.
         current.step = "committed";
-        notify(context, `Commit exists as ${error.hash} — do not retry`, "error");
+        notify(
+          context,
+          `Commit exists as ${error.hash} — do not retry`,
+          "error",
+        );
       }
       flowChanged();
       return result;
     }
     const count = Array.isArray(result.files) ? result.files.length : 0;
-    const hash = typeof result.hash === "string" ? result.hash.slice(0, 12) : "";
+    const hash =
+      typeof result.hash === "string" ? result.hash.slice(0, 12) : "";
     // The service dropped the preview with the commit, so there is nothing left
     // to discard.
     current.token = null;
@@ -1757,7 +1961,10 @@ export function createRuntime({
       return { ok: false, code: "unavailable", message: reason };
     }
     if (flowName === "push") {
-      if (typeof actions.previewPush !== "function" || typeof actions.push !== "function") {
+      if (
+        typeof actions.previewPush !== "function" ||
+        typeof actions.push !== "function"
+      ) {
         const reason = "the git service is missing the push steps";
         notify(context, `${title}: ${reason}`, "error");
         return { ok: false, code: "unavailable", message: reason };
@@ -1765,7 +1972,10 @@ export function createRuntime({
       beginFlow("push", { actions, sessionID, directory });
       return { ok: true, flow: flowName, sessionID, directory };
     }
-    if (typeof actions.status !== "function" || typeof actions.preview !== "function") {
+    if (
+      typeof actions.status !== "function" ||
+      typeof actions.preview !== "function"
+    ) {
       const reason = "the git service is missing the commit steps";
       notify(context, `${title}: ${reason}`, "error");
       return { ok: false, code: "unavailable", message: reason };
@@ -1796,7 +2006,11 @@ export function createRuntime({
       const signature = `${error.code}:${error.message}`;
       if (reported.signature === signature) return false;
       reported.signature = signature;
-      notify(context, `Settings not saved: ${error.message} (${error.code})`, "warning");
+      notify(
+        context,
+        `Settings not saved: ${error.message} (${error.code})`,
+        "warning",
+      );
       return true;
     };
   }
@@ -1851,7 +2065,11 @@ export function createRuntime({
   function showAllButtons() {
     const restored = visibility.showAll();
     if (restored) {
-      notify(context, `Showing ${restored} hidden button${restored === 1 ? "" : "s"}`, "info");
+      notify(
+        context,
+        `Showing ${restored} hidden button${restored === 1 ? "" : "s"}`,
+        "info",
+      );
       reportSettingsError();
     }
     return restored;
@@ -1955,7 +2173,12 @@ export function createRuntime({
 
   // Input mistakes are the dialog's to explain, so they are not also toasted;
   // everything else (a built-in button, an unknown id, a failed save) is.
-  const quietEditCodes = new Set(["invalid-label", "invalid-command", "invalid-args", "project-changed"]);
+  const quietEditCodes = new Set([
+    "invalid-label",
+    "invalid-command",
+    "invalid-args",
+    "project-changed",
+  ]);
   function failEdit(code, reason) {
     if (!quietEditCodes.has(code)) notify(context, reason, "warning");
     return { ok: false, code, reason };
@@ -1965,7 +2188,10 @@ export function createRuntime({
   // refusal is returned rather than toasted.
   function staleCapture(captured, current) {
     if (captureMatches(captured, current)) return null;
-    return failEdit("project-changed", "Project changed. Reopen the button editor.");
+    return failEdit(
+      "project-changed",
+      "Project changed. Reopen the button editor.",
+    );
   }
 
   // A refused edit is reported here; a save the store could not persist is
@@ -1993,7 +2219,10 @@ export function createRuntime({
     if (stale) return stale;
     const id = typeof patch?.id === "string" && patch.id ? patch.id : undefined;
     if (id && controlLocked(id)) {
-      return failEdit("control-locked", "This button is built in and cannot be changed.");
+      return failEdit(
+        "control-locked",
+        "This button is built in and cannot be changed.",
+      );
     }
     if (!id) {
       const result = buttonConfig.addCustom(dir, patch);
@@ -2003,15 +2232,24 @@ export function createRuntime({
     if (custom) {
       // A button added by hand belongs to the project it was created in.
       if (custom.project !== dir) {
-        return failEdit("unknown-action", "That button belongs to another project.");
+        return failEdit(
+          "unknown-action",
+          "That button belongs to another project.",
+        );
       }
       return finishEdit(buttonConfig.updateCustom(id, patch), () => id);
     }
     // An override needs the discovered action to exist: a stale editor row for a
     // button the project no longer has must not save a command for it.
     const project = detector.detect(currentDirectory());
-    const known = actionDescriptors(project).some((descriptor) => descriptor.id === id);
-    if (!known) return failEdit("unknown-action", "That button is not part of this project.");
+    const known = actionDescriptors(project).some(
+      (descriptor) => descriptor.id === id,
+    );
+    if (!known)
+      return failEdit(
+        "unknown-action",
+        "That button is not part of this project.",
+      );
     return finishEdit(buttonConfig.saveOverride(dir, id, patch), () => id);
   }
 
@@ -2022,16 +2260,28 @@ export function createRuntime({
     const stale = staleCapture(projectCapture, dir);
     if (stale) return stale;
     if (controlLocked(id)) {
-      return failEdit("control-locked", "This button is built in and cannot be changed.");
+      return failEdit(
+        "control-locked",
+        "This button is built in and cannot be changed.",
+      );
     }
     if (buttonConfig.customById(id)) {
-      return failEdit("not-overridable", "This button was added by hand; delete it instead.");
+      return failEdit(
+        "not-overridable",
+        "This button was added by hand; delete it instead.",
+      );
     }
     // A stale editor row for a button the project no longer has must not reset
     // anything, so the same rule as saving applies here.
     const project = detector.detect(currentDirectory());
-    const known = actionDescriptors(project).some((descriptor) => descriptor.id === id);
-    if (!known) return failEdit("unknown-action", "That button is not part of this project.");
+    const known = actionDescriptors(project).some(
+      (descriptor) => descriptor.id === id,
+    );
+    if (!known)
+      return failEdit(
+        "unknown-action",
+        "That button is not part of this project.",
+      );
     const result = buttonConfig.resetOverride(dir, id);
     if (!result.ok) return failEdit(result.code, result.reason);
     reportButtonConfigError();
@@ -2054,12 +2304,21 @@ export function createRuntime({
       return failEdit("invalid-id", "A button id is required.");
     }
     if (controlLocked(id)) {
-      return failEdit("control-locked", "This button is built in and cannot be reordered.");
+      return failEdit(
+        "control-locked",
+        "This button is built in and cannot be reordered.",
+      );
     }
     const project = detector.detect(currentDirectory());
-    const list = effectiveDescriptors(project).map((descriptor) => descriptor.id);
+    const list = effectiveDescriptors(project).map(
+      (descriptor) => descriptor.id,
+    );
     const index = list.indexOf(id);
-    if (index < 0) return failEdit("unknown-action", "That button is not part of this project.");
+    if (index < 0)
+      return failEdit(
+        "unknown-action",
+        "That button is not part of this project.",
+      );
     const target = direction === "up" ? index - 1 : index + 1;
     if (target < 0 || target >= list.length) {
       return { ok: true, id, moved: false };
@@ -2080,12 +2339,22 @@ export function createRuntime({
     const stale = staleCapture(projectCapture, dir);
     if (stale) return stale;
     if (controlLocked(id)) {
-      return failEdit("control-locked", "This button is built in and cannot be changed.");
+      return failEdit(
+        "control-locked",
+        "This button is built in and cannot be changed.",
+      );
     }
     const custom = buttonConfig.customById(id);
-    if (!custom) return failEdit("not-custom", "Only buttons added by hand can be deleted.");
+    if (!custom)
+      return failEdit(
+        "not-custom",
+        "Only buttons added by hand can be deleted.",
+      );
     if (custom.project !== dir) {
-      return failEdit("unknown-action", "That button belongs to another project.");
+      return failEdit(
+        "unknown-action",
+        "That button belongs to another project.",
+      );
     }
     const result = buttonConfig.deleteCustom(id);
     if (!result.ok) return failEdit(result.code, result.reason);
@@ -2100,7 +2369,8 @@ export function createRuntime({
     view,
     rows,
     currentDirectory,
-    actionDescriptors: () => effectiveDescriptors(detector.detect(currentDirectory())),
+    actionDescriptors: () =>
+      effectiveDescriptors(detector.detect(currentDirectory())),
     settingsItems,
     settingsError,
     setVisible,
@@ -2169,7 +2439,9 @@ export function createRuntime({
 // host but must stay unique and free of separators it may reserve, so the
 // palette derives a plain id and keeps the real action id only inside `run`.
 function commandSuffix(id) {
-  const plain = String(id).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "");
+  const plain = String(id)
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "");
   return plain || "action";
 }
 
@@ -2245,7 +2517,9 @@ export function createCommands(context, runtime) {
 // legacy host, a missing key - falls back to the config file below.
 function hostKv(context) {
   const kv = context?.kv;
-  return kv && typeof kv.get === "function" && typeof kv.set === "function" ? kv : undefined;
+  return kv && typeof kv.get === "function" && typeof kv.set === "function"
+    ? kv
+    : undefined;
 }
 
 // The V2 durable store: `context.storage.store(key, { initial })` returns
@@ -2280,7 +2554,10 @@ export async function setupWith(context, view, options = {}) {
   });
   // Repository detection is filesystem-only and cached, so a paint never runs
   // git just to decide whether the Commit/Push controls exist.
-  const gitDetector = createGitDetector({ ttlMs: options.gitDetectTtlMs, now: options.now });
+  const gitDetector = createGitDetector({
+    ttlMs: options.gitDetectTtlMs,
+    now: options.now,
+  });
   // Button edits use the same three-tier persistence, read-only at setup: the
   // store is created without writing, so merely loading the plugin leaves no
   // file behind. Tests inject `buttonConfigFile` to stay off a real home.
@@ -2330,7 +2607,8 @@ export async function setupWith(context, view, options = {}) {
         // `after` pins the block below every sidebar.content contribution,
         // whatever order plugins register in.
         after: "sidebar.content",
-        render: (props) => view.Sidebar({ context, runtime, sessionID: props?.sessionID }),
+        render: (props) =>
+          view.Sidebar({ context, runtime, sessionID: props?.sessionID }),
       }),
     );
   }
