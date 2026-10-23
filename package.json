@@ -22,6 +22,7 @@
   "main": "./tui.js",
   "exports": {
     ".": "./tui.js",
+    "./tui": "./tui.js",
     "./package.json": "./package.json"
   },
   "files": [

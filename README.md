@@ -2,17 +2,27 @@
 
 ## Quick install
 
-Launchpad targets **OpenCode V2**. Add `opencode-launchpad` to the existing `plugins` array in
+Launchpad targets **OpenCode V2**. Add the Git package to the existing `plugins` array in
 `~/.config/opencode/cli.json` (or `$XDG_CONFIG_HOME/opencode/cli.json`):
 
 ```json
 {
-  "plugins": ["opencode-launchpad"]
+  "plugins": ["github:giannisCKS/opencode-launchpad#main"]
 }
 ```
 
+The npm release `0.1.0` does not yet contain the `./tui` entrypoint required by the managed TUI
+loader. Use the `#main` branch spec until a fixed npm release exists. For a reproducible install, pin
+the full commit instead of `#main`:
+
+```json
+"plugins": ["github:giannisCKS/opencode-launchpad#<full-40-character-commit>"]
+```
+
 Keep your other plugin entries and settings. OpenCode installs the package; restart the TUI to load
-Launchpad. Open **Launchpad: settings** in the command palette to hide, edit, or add buttons.
+Launchpad. Do not use `opencode plugin add` for this TUI-only package: its root export also resolves,
+so the command can register it as a server plugin. Open **Launchpad: settings** in the command
+palette to hide, edit, or add buttons.
 
 ## Screenshots
 
@@ -380,10 +390,14 @@ per line, with terminal escapes stripped; the dialog shows all retained lines.
 `cli.json` (or equivalent `plugins` entry):
 
 ```json
-"plugins": ["opencode-launchpad"]
+"plugins": ["github:giannisCKS/opencode-launchpad#main"]
 ```
 
-OpenCode resolves and installs the package. To run a local checkout instead, point at its directory:
+`opencode-launchpad@0.1.0` from npm predates the `./tui` export, so it cannot load as a managed TUI
+plugin. Use the Git branch spec above, or replace `#main` with the full commit hash for a
+reproducible install. Add it directly to `cli.json`: `opencode plugin add` can classify this TUI-only
+package as a server plugin because its root export also resolves. To run a local checkout instead,
+point at its directory:
 
 ```json
 "plugins": ["./local-plugins/opencode-launchpad"]
