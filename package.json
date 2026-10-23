@@ -42,14 +42,13 @@
   "engines": {
     "node": ">=22"
   },
+  "dependencies": {
+    "@opentui/solid": "0.6.6"
+  },
   "peerDependencies": {
-    "@opentui/solid": "*",
-    "solid-js": "*"
+    "solid-js": ">=1.9.0"
   },
   "peerDependenciesMeta": {
-    "@opentui/solid": {
-      "optional": true
-    },
     "solid-js": {
       "optional": true
     }

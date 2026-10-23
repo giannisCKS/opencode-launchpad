@@ -26,3 +26,10 @@ test("root package import remains the TUI entrypoint", () => {
 test("the exported TUI entrypoint is included in the package files", () => {
   assert.ok(pkg.files.includes("tui.js"));
 });
+
+test("managed installs provide the JSX runtime without shadowing host core", () => {
+  assert.equal(pkg.dependencies?.["@opentui/solid"], "0.6.6");
+  assert.equal(pkg.peerDependencies?.["solid-js"], ">=1.9.0");
+  assert.equal(pkg.peerDependenciesMeta?.["@opentui/solid"], undefined);
+  assert.equal(pkg.dependencies?.["@opentui/core"], undefined);
+});
