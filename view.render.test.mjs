@@ -1207,6 +1207,36 @@ describe("sidebar layout from a real render", () => {
     expectCellsWellFormed(entry);
   });
 
+  test("a commit error draws behind its guard and survives being cleared", (t) => {
+    if (skipIfNoRenderer(t)) return;
+    // A populated error carries the message and the duplicate hash, and the
+    // dialog keeps its files step instead of crashing on the null state.
+    const shown = measurement("git-error-70");
+    assert.match(shown.frames.frame, /Commit failed: the index is locked\./);
+    // The hash line is measured rather than read from the frame: its row shares
+    // the files step's first row, so the frame can draw one over the other.
+    assert.ok(
+      shown.nodes.some((each) => each.label.includes("commit abc1234 already exists — do not retry")),
+      "the duplicate hash line is missing",
+    );
+    assert.match(shown.frames.frame, /src\/app\.js/);
+
+    // The flow clears the error for the next step while the dialog stays open.
+    // The error reads must not escape their Show guard on the null transition.
+    const cleared = measurement("git-error-cleared-70");
+    assert.doesNotMatch(cleared.frames.frame, /Commit failed/, "the error showed before it was set");
+    assert.match(cleared.frames["after-error"], /Commit failed: the index is locked\./);
+    assert.doesNotMatch(cleared.frames["after-clear"], /Commit failed/, "the cleared error is still drawn");
+    assert.match(cleared.frames["after-clear"], /src\/app\.js/, "the files step left with the error");
+
+    // The whole flow state can go away while the dialog is still mounted. The
+    // step content must unmount without reading through the null.
+    const ended = measurement("git-state-cleared-70");
+    assert.match(ended.frames["with-error"], /Commit failed: the index is locked\./);
+    assert.doesNotMatch(ended.frames.cleared, /Commit failed/, "the ended flow still draws its error");
+    assert.doesNotMatch(ended.frames.cleared, /src\/app\.js/, "the ended flow still draws its files");
+  });
+
   test("the preview diff wraps instead of truncating a line past 200 columns", (t) => {
     if (skipIfNoRenderer(t)) return;
     const entry = measurement("git-preview-longline-36");

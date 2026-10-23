@@ -686,12 +686,12 @@ export function GitDialog(props) {
         </Show>
         <Show when={state()?.error}>
           <text fg={token(theme, "textError")} wrapMode="word" flexShrink={0}>
-            {state().error.message}
+            {state()?.error?.message}
           </text>
         </Show>
         <Show when={state()?.error?.hash}>
           <text fg={token(theme, "textError")} wrapMode="none">
-            {`commit ${state().error.hash} already exists — do not retry`}
+            {`commit ${state()?.error?.hash} already exists — do not retry`}
           </text>
         </Show>
         <Show when={state()?.busy}>

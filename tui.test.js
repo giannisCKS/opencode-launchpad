@@ -1751,7 +1751,7 @@ test("the git dialog drives both flows through the runtime, never through git", 
   assert.match(dialog, /state\(\)\?\.error\?\.hash/);
   assert.match(
     dialog,
-    /commit \$\{state\(\)\.error\.hash\} already exists — do not retry/,
+    /commit \$\{state\(\)\?\.error\?\.hash\} already exists — do not retry/,
   );
   const committedBlocks = [
     ...dialog.matchAll(/<Show when=\{step\("committed"\)\}>[\s\S]*?<\/Show>/g),

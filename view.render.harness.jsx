@@ -60,6 +60,9 @@ function createFakeRuntime(initial) {
   const notifyGit = () => {
     for (const listener of Array.from(gitListeners)) listener();
   };
+  // A cancelled or closed flow reports no state at all. The dialog must unmount
+  // its step content without reading through the null.
+  let gitCleared = false;
   const git = {
     kind: initial.git?.kind ?? "commit",
     step: initial.git?.step ?? "files",
@@ -88,7 +91,7 @@ function createFakeRuntime(initial) {
           if (index > -1) gitListeners.splice(index, 1);
         };
       },
-      state: () => ({
+      state: () => (gitCleared ? null : {
         ...git,
         files: git.files.map((file) => ({ ...file })),
         selection: [...git.selection],
@@ -134,6 +137,17 @@ function createFakeRuntime(initial) {
       confirm: () => calls.push(["confirm"]),
       confirmPush: () => calls.push(["confirmPush"]),
       pushNow: () => calls.push(["pushNow"]),
+      // The flow clears its error before every new step, so a scenario can
+      // replay the populated-then-null transition the view has to follow.
+      setError(error) {
+        git.error = error;
+        notifyGit();
+      },
+      // The flow has ended, so the dialog sees no state at all.
+      clearState() {
+        gitCleared = true;
+        notifyGit();
+      },
     },
     notify() {
       for (const listener of Array.from(listeners)) listener();
@@ -1382,6 +1396,46 @@ gitScenario("git-files-longpath-70", {
       { path: "src/app.js", status: "modified", blocked: null, session: true, unattributed: false },
     ],
     selection: [],
+  },
+});
+
+// A populated error draws its message and, when the service reported one, the
+// duplicate commit hash. Both reads live behind their own Show guard.
+gitScenario("git-error-70", {
+  git: {
+    files: gitFileList,
+    selection: ["src/app.js"],
+    error: { code: "commit-failed", message: "Commit failed: the index is locked.", hash: "abc1234" },
+  },
+});
+
+// The flow clears the error before the next step, which replaces the error text
+// while the dialog stays open. A read outside the guard crashes here.
+gitScenario("git-error-cleared-70", {
+  git: { files: gitFileList, selection: ["src/app.js"] },
+  async after(setup, runtime, capture) {
+    runtime.gitFlow.setError({ code: "commit-failed", message: "Commit failed: the index is locked." });
+    await setup.renderOnce();
+    capture("after-error");
+    runtime.gitFlow.setError(null);
+    await setup.renderOnce();
+    capture("after-clear");
+  },
+});
+
+// The flow ends while the dialog stays mounted: state() reports null and the
+// step content unmounts. Any unguarded read crashes on this transition.
+gitScenario("git-state-cleared-70", {
+  git: {
+    files: gitFileList,
+    selection: ["src/app.js"],
+    error: { code: "commit-failed", message: "Commit failed: the index is locked.", hash: "abc1234" },
+  },
+  async after(setup, runtime, capture) {
+    capture("with-error");
+    runtime.gitFlow.clearState();
+    await setup.renderOnce();
+    capture("cleared");
   },
 });
 
